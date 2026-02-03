@@ -24,10 +24,26 @@ const PORT_CONNECTOR_LEN_PX: f64 = 11.0;
 const LOGICAL_PORT_CONNECTOR_LEN_PX: f64 = 20.0;
 const SHOW_PROCESS_DEBUG: bool = false;
 const SHOW_LOGICAL_DEBUG_BBOX: bool = false;
-const BORDER_COLOR: (f64, f64, f64) = (0x55 as f64 / 255.0, 0x55 as f64 / 255.0, 0x55 as f64 / 255.0);
-const DEFAULT_FILL_COLOR: (f64, f64, f64) = (0xF6 as f64 / 255.0, 0xF6 as f64 / 255.0, 0xF6 as f64 / 255.0);
-const AUX_LINE_COLOR: (f64, f64, f64) = (0x6A as f64 / 255.0, 0x6A as f64 / 255.0, 0x6A as f64 / 255.0);
-const ASSOCIATION_FILL_COLOR: (f64, f64, f64) = (0x6B as f64 / 255.0, 0x6B as f64 / 255.0, 0x6B as f64 / 255.0);
+const BORDER_COLOR: (f64, f64, f64) = (
+    0x55 as f64 / 255.0,
+    0x55 as f64 / 255.0,
+    0x55 as f64 / 255.0,
+);
+const DEFAULT_FILL_COLOR: (f64, f64, f64) = (
+    0xF6 as f64 / 255.0,
+    0xF6 as f64 / 255.0,
+    0xF6 as f64 / 255.0,
+);
+const AUX_LINE_COLOR: (f64, f64, f64) = (
+    0x6A as f64 / 255.0,
+    0x6A as f64 / 255.0,
+    0x6A as f64 / 255.0,
+);
+const ASSOCIATION_FILL_COLOR: (f64, f64, f64) = (
+    0x6B as f64 / 255.0,
+    0x6B as f64 / 255.0,
+    0x6B as f64 / 255.0,
+);
 const CLONE_MARKER_HEIGHT_RATIO: f64 = 0.30;
 const CLONE_MARKER_FILL_COLOR: (f64, f64, f64) = (0.82, 0.82, 0.82);
 const CLONE_MARKER_STROKE_WIDTH: f64 = 1.5;
@@ -185,8 +201,8 @@ fn render_svg<F>(svg_path: &Path, width: f64, height: f64, render: F) -> Result<
 where
     F: FnOnce(&CairoContext) -> Result<()>,
 {
-    let surface = SvgSurface::new(width, height, Some(svg_path))
-        .context("Failed to create SVG surface")?;
+    let surface =
+        SvgSurface::new(width, height, Some(svg_path)).context("Failed to create SVG surface")?;
     let ctx = CairoContext::new(&surface).context("Failed to create Cairo context")?;
     setup_context(&ctx)?;
     render(&ctx)?;
@@ -231,10 +247,7 @@ fn render_sbgnml(
     let mut child_map: HashMap<String, Vec<&Glyph>> = HashMap::new();
     for glyph in glyphs {
         if let Some(parent_id) = &glyph.parent_id {
-            child_map
-                .entry(parent_id.clone())
-                .or_default()
-                .push(glyph);
+            child_map.entry(parent_id.clone()).or_default().push(glyph);
         }
     }
 
@@ -261,7 +274,10 @@ fn render_sbgnml(
         };
         let class_name = glyph.class_name.as_str();
         let label = if class_name == "state variable" && glyph.label.trim().is_empty() {
-            state_var_label(glyph.state_value.as_deref(), glyph.state_variable.as_deref())
+            state_var_label(
+                glyph.state_value.as_deref(),
+                glyph.state_variable.as_deref(),
+            )
         } else {
             glyph.label.clone()
         };
@@ -288,7 +304,14 @@ fn render_sbgnml(
             .iter()
             .map(|pt| transform.map_point(pt.x, pt.y))
             .collect();
-        draw_arc(ctx, &points_px, &arc.class_name, arrow_size_px, bar_length_px, bar_offset_px)?;
+        draw_arc(
+            ctx,
+            &points_px,
+            &arc.class_name,
+            arrow_size_px,
+            bar_length_px,
+            bar_offset_px,
+        )?;
     }
     Ok(())
 }
@@ -318,17 +341,23 @@ fn render_glyph_tree(
     };
     let mut label = label_override.unwrap_or(glyph.label.as_str()).to_string();
     if class_name == "state variable" && label.trim().is_empty() {
-        label = state_var_label(glyph.state_value.as_deref(), glyph.state_variable.as_deref());
+        label = state_var_label(
+            glyph.state_value.as_deref(),
+            glyph.state_variable.as_deref(),
+        );
     }
     let font_px = glyph_font_px(class_name);
     let has_clone = show_clone_markers && glyph.has_clone;
-    let children = child_map.get(&glyph.id).map(|items| items.as_slice()).unwrap_or(&[]);
-    let has_u_info_bbox = children.iter().any(|child| {
-        child.class_name == "unit of information" && child.bbox.is_some()
-    });
-    let has_s_var_bbox = children.iter().any(|child| {
-        child.class_name == "state variable" && child.bbox.is_some()
-    });
+    let children = child_map
+        .get(&glyph.id)
+        .map(|items| items.as_slice())
+        .unwrap_or(&[]);
+    let has_u_info_bbox = children
+        .iter()
+        .any(|child| child.class_name == "unit of information" && child.bbox.is_some());
+    let has_s_var_bbox = children
+        .iter()
+        .any(|child| child.class_name == "state variable" && child.bbox.is_some());
     let u_info_label = if has_u_info_bbox {
         None
     } else {
@@ -340,7 +369,11 @@ fn render_glyph_tree(
         first_child_state_label(children, "state variable")
     };
     let place_label_bottom = class_base == "complex" || class_name == "compartment";
-    let shape_label = if place_label_bottom { "" } else { label.as_str() };
+    let shape_label = if place_label_bottom {
+        ""
+    } else {
+        label.as_str()
+    };
 
     match class_name {
         "phenotype" | "outcome" => {
@@ -451,9 +484,7 @@ fn render_glyph_tree(
         "unit of information" => {
             draw_round_rect_bbox(ctx, transform, bbox, shape_label, font_px, false)?
         }
-        "state variable" => {
-            draw_stadium_bbox(ctx, transform, bbox, shape_label, font_px, false)?
-        }
+        "state variable" => draw_stadium_bbox(ctx, transform, bbox, shape_label, font_px, false)?,
         "and" | "or" | "not" => {
             draw_circle_bbox(ctx, transform, bbox, shape_label, font_px)?;
             if SHOW_LOGICAL_DEBUG_BBOX {
@@ -517,11 +548,7 @@ fn draw_box_bbox(
     )
 }
 
-fn draw_process_debug_bbox(
-    ctx: &CairoContext,
-    transform: &Transform,
-    bbox: BBox,
-) -> Result<()> {
+fn draw_process_debug_bbox(ctx: &CairoContext, transform: &Transform, bbox: BBox) -> Result<()> {
     let rect = bbox_pixel_rect(transform, bbox);
     let inset_rect = PixelRect {
         x0: rect.x0 - 10.0,
@@ -539,11 +566,7 @@ fn draw_process_debug_bbox(
     Ok(())
 }
 
-fn draw_logical_debug_bbox(
-    ctx: &CairoContext,
-    transform: &Transform,
-    bbox: BBox,
-) -> Result<()> {
+fn draw_logical_debug_bbox(ctx: &CairoContext, transform: &Transform, bbox: BBox) -> Result<()> {
     let rect = bbox_pixel_rect(transform, bbox);
     ctx.set_source_rgb(1.0, 0.0, 1.0);
     ctx.set_line_width(1.0);
@@ -619,7 +642,13 @@ fn draw_double_circle_bbox(
     let radius = (rect.width.min(rect.height) / 2.0).max(1.0);
     ctx.new_path();
     ctx.set_line_width(DEFAULT_LINE_WIDTH);
-    ctx.arc(rect.center.x, rect.center.y, radius, 0.0, std::f64::consts::TAU);
+    ctx.arc(
+        rect.center.x,
+        rect.center.y,
+        radius,
+        0.0,
+        std::f64::consts::TAU,
+    );
     ctx.set_source_rgb(
         DEFAULT_FILL_COLOR.0,
         DEFAULT_FILL_COLOR.1,
@@ -841,13 +870,7 @@ fn draw_entity_pool_node(
         entity_pool_border_width(class_name),
     )?;
 
-    draw_entity_pool_aux_items(
-        ctx,
-        rect,
-        class_name,
-        u_info_label,
-        s_var_label,
-    )?;
+    draw_entity_pool_aux_items(ctx, rect, class_name, u_info_label, s_var_label)?;
     Ok(())
 }
 
@@ -1351,7 +1374,14 @@ fn draw_unit_info(
         },
     };
     ctx.set_line_width(border_width.max(1.0));
-    path_round_rect_impl(ctx, rect.x0, rect.y0, rect.width, rect.height, rect.width * 0.04)?;
+    path_round_rect_impl(
+        ctx,
+        rect.x0,
+        rect.y0,
+        rect.width,
+        rect.height,
+        rect.width * 0.04,
+    )?;
     ctx.set_source_rgb(1.0, 1.0, 1.0);
     ctx.fill_preserve()?;
     ctx.set_source_rgb(BORDER_COLOR.0, BORDER_COLOR.1, BORDER_COLOR.2);
@@ -1417,7 +1447,6 @@ fn px_x(rect: PixelRect, value: f64, scale_x: f64) -> f64 {
 fn px_y(rect: PixelRect, value: f64, scale_y: f64) -> f64 {
     rect.y0 + value * scale_y
 }
-
 
 fn draw_circle_bbox(
     ctx: &CairoContext,
@@ -1598,10 +1627,7 @@ fn path_concave_hexagon(ctx: &CairoContext, rect: PixelRect) -> Result<()> {
             x: x0 + w,
             y: y0 + h,
         },
-        Point {
-            x: x0,
-            y: y0 + h,
-        },
+        Point { x: x0, y: y0 + h },
         Point {
             x: x0 + 0.15 * w,
             y: y0 + 0.5 * h,
@@ -1673,7 +1699,13 @@ fn path_round_rect_impl(
     ctx.new_path();
     ctx.move_to(x + radius, y);
     ctx.line_to(right - radius, y);
-    ctx.arc(right - radius, y + radius, radius, -std::f64::consts::FRAC_PI_2, 0.0);
+    ctx.arc(
+        right - radius,
+        y + radius,
+        radius,
+        -std::f64::consts::FRAC_PI_2,
+        0.0,
+    );
     ctx.line_to(right, bottom - radius);
     ctx.arc(
         right - radius,
@@ -1773,12 +1805,11 @@ fn draw_arc(
     let prev = points[points.len() - 2];
 
     match class_name {
-        "assignment" | "unknown influence" => {
-            draw_open_triangle(ctx, end, prev, arrow_size)?
-        }
+        "assignment" | "unknown influence" => draw_open_triangle(ctx, end, prev, arrow_size)?,
         "positive influence" | "stimulation" => {
             draw_open_triangle_opaque(ctx, end, prev, arrow_size)?
         }
+        "modulation" => draw_open_diamond_opaque(ctx, end, prev, arrow_size)?,
         "production" => draw_filled_triangle(ctx, end, prev, arrow_size)?,
         "negative influence" | "inhibition" => {
             draw_inhibition_bar(ctx, end, prev, bar_length, 0.0)?
@@ -1800,13 +1831,25 @@ fn draw_arc(
 }
 
 fn draw_open_circle(ctx: &CairoContext, center: Point, radius: f64) -> Result<()> {
-    ctx.arc(center.x, center.y, radius.max(1.0), 0.0, std::f64::consts::TAU);
+    ctx.arc(
+        center.x,
+        center.y,
+        radius.max(1.0),
+        0.0,
+        std::f64::consts::TAU,
+    );
     ctx.stroke()?;
     Ok(())
 }
 
 fn draw_filled_circle(ctx: &CairoContext, center: Point, radius: f64) -> Result<()> {
-    ctx.arc(center.x, center.y, radius.max(1.0), 0.0, std::f64::consts::TAU);
+    ctx.arc(
+        center.x,
+        center.y,
+        radius.max(1.0),
+        0.0,
+        std::f64::consts::TAU,
+    );
     ctx.set_source_rgb(1.0, 1.0, 1.0);
     ctx.fill_preserve()?;
     ctx.set_source_rgb(BORDER_COLOR.0, BORDER_COLOR.1, BORDER_COLOR.2);
@@ -1849,12 +1892,7 @@ fn draw_open_triangle(ctx: &CairoContext, end: Point, prev: Point, size: f64) ->
     Ok(())
 }
 
-fn draw_open_triangle_opaque(
-    ctx: &CairoContext,
-    end: Point,
-    prev: Point,
-    size: f64,
-) -> Result<()> {
+fn draw_open_triangle_opaque(ctx: &CairoContext, end: Point, prev: Point, size: f64) -> Result<()> {
     let Some((p1, p2, tip)) = triangle_points(end, prev, size) else {
         return Ok(());
     };
@@ -1881,6 +1919,22 @@ fn draw_filled_triangle(ctx: &CairoContext, end: Point, prev: Point, size: f64) 
     Ok(())
 }
 
+fn draw_open_diamond_opaque(ctx: &CairoContext, end: Point, prev: Point, size: f64) -> Result<()> {
+    let Some((tip, p1, base, p2)) = diamond_points(end, prev, size) else {
+        return Ok(());
+    };
+    ctx.move_to(tip.x, tip.y);
+    ctx.line_to(p1.x, p1.y);
+    ctx.line_to(base.x, base.y);
+    ctx.line_to(p2.x, p2.y);
+    ctx.close_path();
+    ctx.set_source_rgb(1.0, 1.0, 1.0);
+    ctx.fill_preserve()?;
+    ctx.set_source_rgb(BORDER_COLOR.0, BORDER_COLOR.1, BORDER_COLOR.2);
+    ctx.stroke()?;
+    Ok(())
+}
+
 fn triangle_points(end: Point, prev: Point, size: f64) -> Option<(Point, Point, Point)> {
     let dx = end.x - prev.x;
     let dy = end.y - prev.y;
@@ -1904,6 +1958,37 @@ fn triangle_points(end: Point, prev: Point, size: f64) -> Option<(Point, Point, 
         y: base_y - perp_y * half_width,
     };
     Some((p1, p2, end))
+}
+
+fn diamond_points(end: Point, prev: Point, size: f64) -> Option<(Point, Point, Point, Point)> {
+    let dx = end.x - prev.x;
+    let dy = end.y - prev.y;
+    let length = (dx * dx + dy * dy).sqrt();
+    if length == 0.0 {
+        return None;
+    }
+    let ux = dx / length;
+    let uy = dy / length;
+    let center = Point {
+        x: end.x - ux * size * 0.5,
+        y: end.y - uy * size * 0.5,
+    };
+    let base = Point {
+        x: end.x - ux * size,
+        y: end.y - uy * size,
+    };
+    let perp_x = -uy;
+    let perp_y = ux;
+    let half_width = size * 0.6;
+    let p1 = Point {
+        x: center.x + perp_x * half_width,
+        y: center.y + perp_y * half_width,
+    };
+    let p2 = Point {
+        x: center.x - perp_x * half_width,
+        y: center.y - perp_y * half_width,
+    };
+    Some((end, p1, base, p2))
 }
 
 fn draw_inhibition_bar(
@@ -2097,16 +2182,16 @@ fn parse_sbgn(doc: &Document) -> Result<(Vec<Glyph>, Vec<Arc>, Bounds)> {
         .descendants()
         .find(|node| node.has_tag_name("map"))
         .ok_or_else(|| anyhow!("SBGN file missing map element"))?;
-    for glyph_node in map_node.children().filter(|node| node.has_tag_name("glyph")) {
+    for glyph_node in map_node
+        .children()
+        .filter(|node| node.has_tag_name("glyph"))
+    {
         parse_glyph_node(&glyph_node, None, &mut glyphs)?;
     }
 
     let mut arcs = Vec::new();
     for arc in arc_nodes {
-        let class_name = arc
-            .attribute("class")
-            .unwrap_or_default()
-            .to_string();
+        let class_name = arc.attribute("class").unwrap_or_default().to_string();
         let start = arc
             .children()
             .find(|node| node.has_tag_name("start"))
@@ -2123,7 +2208,10 @@ fn parse_sbgn(doc: &Document) -> Result<(Vec<Glyph>, Vec<Arc>, Bounds)> {
         });
 
         for next in arc.children().filter(|node| node.has_tag_name("next")) {
-            if let (Some(x), Some(y)) = (parse_f64(next.attribute("x")), parse_f64(next.attribute("y"))) {
+            if let (Some(x), Some(y)) = (
+                parse_f64(next.attribute("x")),
+                parse_f64(next.attribute("y")),
+            ) {
                 points.push(Point { x, y });
             }
         }
@@ -2147,13 +2235,8 @@ fn parse_glyph_node(
 ) -> Result<()> {
     // Walk the SBGN XML tree recursively so child glyphs (units, state vars) keep their parent.
     let id = glyph.attribute("id").unwrap_or_default().to_string();
-    let class_name = glyph
-        .attribute("class")
-        .unwrap_or_default()
-        .to_string();
-    let label_node = glyph
-        .children()
-        .find(|node| node.has_tag_name("label"));
+    let class_name = glyph.attribute("class").unwrap_or_default().to_string();
+    let label_node = glyph.children().find(|node| node.has_tag_name("label"));
     let mut label = label_node
         .and_then(|node| node.attribute("text"))
         .unwrap_or("")
@@ -2181,7 +2264,9 @@ fn parse_glyph_node(
     let state_variable = state_node
         .and_then(|node| node.attribute("variable"))
         .map(|value| value.to_string());
-    let orientation = glyph.attribute("orientation").map(|value| value.to_string());
+    let orientation = glyph
+        .attribute("orientation")
+        .map(|value| value.to_string());
 
     let glyph_id = id.clone();
     glyphs.push(Glyph {
@@ -2238,22 +2323,10 @@ fn compute_bounds(glyphs: &[Glyph], _arcs: &[Arc]) -> Result<Bounds> {
     }
 
     Ok(Bounds {
-        min_x: x_values
-            .iter()
-            .copied()
-            .fold(f64::INFINITY, f64::min),
-        max_x: x_values
-            .iter()
-            .copied()
-            .fold(f64::NEG_INFINITY, f64::max),
-        min_y: y_values
-            .iter()
-            .copied()
-            .fold(f64::INFINITY, f64::min),
-        max_y: y_values
-            .iter()
-            .copied()
-            .fold(f64::NEG_INFINITY, f64::max),
+        min_x: x_values.iter().copied().fold(f64::INFINITY, f64::min),
+        max_x: x_values.iter().copied().fold(f64::NEG_INFINITY, f64::max),
+        min_y: y_values.iter().copied().fold(f64::INFINITY, f64::min),
+        max_y: y_values.iter().copied().fold(f64::NEG_INFINITY, f64::max),
     })
 }
 

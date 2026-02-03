@@ -10,6 +10,7 @@
 - Build: `cargo build` (debug) or `cargo build --release`.
 - Run (release): `./target/release/render_sbgn_rs draw_sbgnml --input examples/sbgn/foo.sbgn --output out.png --padding 10`.
 - Tests: none yet (use `cargo test` if you add them).
+- Formatting: use `cargo fmt` and prefer the system rustfmt (`/usr/bin/cargo-fmt`). If rustfmt is missing, install via `rustup component add rustfmt` (preferred) or `cargo install rustfmt`, and then run `cargo fmt -- --force` if the installed rustfmt warns about being deprecated. Ensure `~/.cargo/bin` is on `PATH` when using the cargo-installed rustfmt.
 
 ## Coding Style
 - Rust 2021; run `cargo fmt` when changing structure.
