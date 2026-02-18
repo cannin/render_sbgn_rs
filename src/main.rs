@@ -9,6 +9,24 @@ use pango::{Alignment, FontDescription};
 use pangocairo::functions as pangocairo;
 use roxmltree::Document;
 
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+struct Color {
+    r: f64,
+    g: f64,
+    b: f64,
+    a: f64,
+}
+
+impl Color {
+    const fn rgb(r: f64, g: f64, b: f64) -> Self {
+        Self { r, g, b, a: 1.0 }
+    }
+
+    const fn rgba(r: f64, g: f64, b: f64, a: f64) -> Self {
+        Self { r, g, b, a }
+    }
+}
+
 const DEFAULT_PADDING_PX: f64 = 10.0;
 const DEFAULT_LINE_WIDTH: f64 = 1.5;
 const FONT_MAIN_PX: f64 = 20.0;
@@ -24,32 +42,38 @@ const PORT_CONNECTOR_LEN_PX: f64 = 11.0;
 const LOGICAL_PORT_CONNECTOR_LEN_PX: f64 = 20.0;
 const SHOW_PROCESS_DEBUG: bool = false;
 const SHOW_LOGICAL_DEBUG_BBOX: bool = false;
-const BORDER_COLOR: (f64, f64, f64) = (
+const BORDER_COLOR: Color = Color::rgb(
     0x55 as f64 / 255.0,
     0x55 as f64 / 255.0,
     0x55 as f64 / 255.0,
 );
-const DEFAULT_FILL_COLOR: (f64, f64, f64) = (
+const DEFAULT_FILL_COLOR: Color = Color::rgb(
     0xF6 as f64 / 255.0,
     0xF6 as f64 / 255.0,
     0xF6 as f64 / 255.0,
 );
-const AUX_LINE_COLOR: (f64, f64, f64) = (
+const AUX_LINE_COLOR: Color = Color::rgb(
     0x6A as f64 / 255.0,
     0x6A as f64 / 255.0,
     0x6A as f64 / 255.0,
 );
-const ASSOCIATION_FILL_COLOR: (f64, f64, f64) = (
+const ASSOCIATION_FILL_COLOR: Color = Color::rgb(
     0x6B as f64 / 255.0,
     0x6B as f64 / 255.0,
     0x6B as f64 / 255.0,
 );
 const CLONE_MARKER_HEIGHT_RATIO: f64 = 0.30;
-const CLONE_MARKER_FILL_COLOR: (f64, f64, f64) = (0.82, 0.82, 0.82);
+const CLONE_MARKER_FILL_COLOR: Color = Color::rgb(0.82, 0.82, 0.82);
 const CLONE_MARKER_STROKE_WIDTH: f64 = 1.5;
+const WHITE_COLOR: Color = Color::rgb(1.0, 1.0, 1.0);
 
 #[derive(Parser)]
-#[command(author, version, about = "Render SBGNML diagrams to PNG", long_about = None)]
+#[command(
+    author,
+    version,
+    about = "Render SBGNML diagrams to PNG and SVG",
+    long_about = None
+)]
 struct Cli {
     #[command(subcommand)]
     command: Command,
@@ -61,8 +85,10 @@ enum Command {
     DrawSbgnml {
         #[arg(long)]
         input: PathBuf,
-        #[arg(long, default_value = "sbgnml.png")]
-        output: PathBuf,
+        #[arg(long)]
+        output: Option<PathBuf>,
+        #[arg(long, default_value = "png,svg")]
+        format: String,
         #[arg(long, default_value_t = DEFAULT_PADDING_PX)]
         padding: f64,
         #[arg(long, default_value_t = true)]
@@ -109,7 +135,10 @@ struct Glyph {
 
 #[derive(Debug)]
 struct Arc {
+    id: String,
     class_name: String,
+    source: Option<String>,
+    target: Option<String>,
     points: Vec<Point>,
 }
 
@@ -127,6 +156,46 @@ struct Transform {
     min_y: f64,
     scale_x: f64,
     scale_y: f64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum OutputFormat {
+    Png,
+    Svg,
+}
+
+#[derive(Clone, Copy, Debug)]
+enum TagOrientation {
+    Left,
+    Right,
+}
+
+impl OutputFormat {
+    fn extension(self) -> &'static str {
+        match self {
+            OutputFormat::Png => "png",
+            OutputFormat::Svg => "svg",
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default)]
+struct RenderStyle {
+    font_size: Option<f64>,
+    font_family: Option<String>,
+    font_color: Option<Color>,
+    stroke_color: Option<Color>,
+    stroke_width: Option<f64>,
+    fill_color: Option<Color>,
+    background_opacity: Option<f64>,
+}
+
+#[derive(Clone, Debug, Default)]
+struct RenderInfo {
+    background_color: Option<Color>,
+    default_style: Option<RenderStyle>,
+    styles: HashMap<String, RenderStyle>,
+    colors: HashMap<String, Color>,
 }
 
 impl Transform {
@@ -165,46 +234,59 @@ fn main() -> Result<()> {
         Command::DrawSbgnml {
             input,
             output,
+            format,
             padding,
             clone_markers,
         } => {
-            let svg_path = default_svg_output_path(&output);
-            draw_sbgnml(&input, &output, padding, &svg_path, clone_markers)
+            let output_base = output.unwrap_or_else(|| input.clone());
+            let formats = parse_output_formats(&format)?;
+            draw_sbgnml(&input, &output_base, &formats, padding, clone_markers)
         }
     }
 }
 
-fn setup_context(ctx: &CairoContext) -> Result<()> {
-    ctx.set_source_rgb(1.0, 1.0, 1.0);
+fn set_source_color(ctx: &CairoContext, color: Color) {
+    ctx.set_source_rgba(color.r, color.g, color.b, color.a);
+}
+
+fn setup_context(ctx: &CairoContext, background: Option<Color>) -> Result<()> {
+    let bg_color = background
+        .filter(|color| color.a > 0.0)
+        .unwrap_or(WHITE_COLOR);
+    set_source_color(ctx, bg_color);
     ctx.paint()?;
-    ctx.set_source_rgb(BORDER_COLOR.0, BORDER_COLOR.1, BORDER_COLOR.2);
+    set_source_color(ctx, BORDER_COLOR);
     ctx.set_line_width(DEFAULT_LINE_WIDTH);
     ctx.set_line_cap(LineCap::Square);
     Ok(())
 }
 
-fn create_png_surface(width: i32, height: i32) -> Result<(ImageSurface, CairoContext)> {
+fn create_png_surface(
+    width: i32,
+    height: i32,
+    background: Option<Color>,
+) -> Result<(ImageSurface, CairoContext)> {
     let surface = ImageSurface::create(Format::ARgb32, width, height)
         .context("Failed to create image surface")?;
     let ctx = CairoContext::new(&surface).context("Failed to create Cairo context")?;
-    setup_context(&ctx)?;
+    setup_context(&ctx, background)?;
     Ok((surface, ctx))
 }
 
-fn default_svg_output_path(output: &Path) -> PathBuf {
-    let mut svg_path = output.to_path_buf();
-    svg_path.set_extension("svg");
-    svg_path
-}
-
-fn render_svg<F>(svg_path: &Path, width: f64, height: f64, render: F) -> Result<()>
+fn render_svg<F>(
+    svg_path: &Path,
+    width: f64,
+    height: f64,
+    background: Option<Color>,
+    render: F,
+) -> Result<()>
 where
     F: FnOnce(&CairoContext) -> Result<()>,
 {
     let surface =
         SvgSurface::new(width, height, Some(svg_path)).context("Failed to create SVG surface")?;
     let ctx = CairoContext::new(&surface).context("Failed to create Cairo context")?;
-    setup_context(&ctx)?;
+    setup_context(&ctx, background)?;
     render(&ctx)?;
     surface.finish();
     Ok(())
@@ -212,28 +294,352 @@ where
 
 fn draw_sbgnml(
     input: &Path,
-    output: &Path,
+    output_base: &Path,
+    formats: &[OutputFormat],
     padding: f64,
-    svg_output: &Path,
     show_clone_markers: bool,
 ) -> Result<()> {
     let xml = fs::read_to_string(input).with_context(|| format!("Failed to read {:?}", input))?;
     let doc = Document::parse(&xml).context("Failed to parse SBGN XML")?;
+    let render_info = parse_render_information(&doc);
     let (glyphs, arcs, bounds) = parse_sbgn(&doc)?;
+    let tag_orientations = compute_tag_orientations(&glyphs, &arcs);
 
     let (transform, width_f, height_f) = transform_with_padding(bounds, padding);
-    let (surface, ctx) = create_png_surface(width_f.ceil() as i32, height_f.ceil() as i32)?;
-    render_sbgnml(&ctx, &transform, &glyphs, &arcs, show_clone_markers)?;
+    if formats.contains(&OutputFormat::Png) {
+        let png_path = output_path_for_format(output_base, OutputFormat::Png);
+        let (surface, ctx) = create_png_surface(
+            width_f.ceil() as i32,
+            height_f.ceil() as i32,
+            render_info.background_color,
+        )?;
+        render_sbgnml(
+            &ctx,
+            &transform,
+            &glyphs,
+            &arcs,
+            &render_info,
+            &tag_orientations,
+            show_clone_markers,
+        )?;
 
-    let mut file = fs::File::create(output).context("Failed to create PNG file")?;
-    surface
-        .write_to_png(&mut file)
-        .context("Failed to write PNG")?;
+        let mut file = fs::File::create(&png_path).context("Failed to create PNG file")?;
+        surface
+            .write_to_png(&mut file)
+            .context("Failed to write PNG")?;
+    }
 
-    render_svg(svg_output, width_f, height_f, |ctx| {
-        render_sbgnml(ctx, &transform, &glyphs, &arcs, show_clone_markers)
-    })?;
+    if formats.contains(&OutputFormat::Svg) {
+        let svg_path = output_path_for_format(output_base, OutputFormat::Svg);
+        render_svg(
+            &svg_path,
+            width_f,
+            height_f,
+            render_info.background_color,
+            |ctx| {
+                render_sbgnml(
+                    ctx,
+                    &transform,
+                    &glyphs,
+                    &arcs,
+                    &render_info,
+                    &tag_orientations,
+                    show_clone_markers,
+                )
+            },
+        )?;
+    }
     Ok(())
+}
+
+fn output_path_for_format(output_base: &Path, format: OutputFormat) -> PathBuf {
+    let mut path = output_base.to_path_buf();
+    path.set_extension(format.extension());
+    path
+}
+
+fn parse_output_formats(value: &str) -> Result<Vec<OutputFormat>> {
+    let mut formats = Vec::new();
+    for raw in value.split(',') {
+        let normalized = raw.trim().to_lowercase();
+        if normalized.is_empty() {
+            continue;
+        }
+        let format = match normalized.as_str() {
+            "png" => OutputFormat::Png,
+            "svg" => OutputFormat::Svg,
+            _ => {
+                return Err(anyhow!(
+                    "Unsupported format '{normalized}'. Use --format png,svg"
+                ))
+            }
+        };
+        if !formats.contains(&format) {
+            formats.push(format);
+        }
+    }
+
+    if formats.is_empty() {
+        return Err(anyhow!("No output formats specified. Use --format png,svg"));
+    }
+
+    Ok(formats)
+}
+
+fn compute_tag_orientations(glyphs: &[Glyph], arcs: &[Arc]) -> HashMap<String, TagOrientation> {
+    let mut orientations = HashMap::new();
+    for glyph in glyphs.iter().filter(|item| item.class_name == "tag") {
+        let Some(bbox) = glyph.bbox else {
+            continue;
+        };
+        let mut best: Option<(f64, TagOrientation)> = None;
+        for arc in arcs {
+            let (matches, point) = match_arc_connection(arc, &glyph.id);
+            if !matches {
+                continue;
+            }
+            let Some(point) = point else {
+                continue;
+            };
+            let dist_left = (point.x - bbox.x).abs();
+            let dist_right = (point.x - (bbox.x + bbox.w)).abs();
+            let (dist, orientation) = if dist_left <= dist_right {
+                (dist_left, TagOrientation::Left)
+            } else {
+                (dist_right, TagOrientation::Right)
+            };
+            match best {
+                Some((best_dist, _)) if best_dist <= dist => {}
+                _ => best = Some((dist, orientation)),
+            }
+        }
+        let orientation = best.map(|item| item.1).unwrap_or(TagOrientation::Left);
+        orientations.insert(glyph.id.clone(), orientation);
+    }
+    orientations
+}
+
+fn match_arc_connection(arc: &Arc, glyph_id: &str) -> (bool, Option<Point>) {
+    let source_matches = arc
+        .source
+        .as_deref()
+        .map(|value| arc_ref_matches(value, glyph_id))
+        .unwrap_or(false);
+    if source_matches {
+        return (true, arc.points.first().copied());
+    }
+    let target_matches = arc
+        .target
+        .as_deref()
+        .map(|value| arc_ref_matches(value, glyph_id))
+        .unwrap_or(false);
+    if target_matches {
+        return (true, arc.points.last().copied());
+    }
+    (false, None)
+}
+
+fn arc_ref_matches(arc_ref: &str, glyph_id: &str) -> bool {
+    arc_ref == glyph_id || arc_ref.starts_with(&format!("{glyph_id}."))
+}
+
+fn parse_render_information(doc: &Document) -> RenderInfo {
+    let mut info = RenderInfo::default();
+    let Some(render_node) = doc
+        .descendants()
+        .find(|node| node.has_tag_name("renderInformation"))
+    else {
+        return info;
+    };
+
+    for color_def in render_node
+        .descendants()
+        .filter(|node| node.has_tag_name("colorDefinition"))
+    {
+        let Some(id) = color_def.attribute("id") else {
+            continue;
+        };
+        let Some(value) = color_def.attribute("value") else {
+            continue;
+        };
+        if let Some(color) = parse_color_value(value, &info.colors) {
+            info.colors.insert(id.to_string(), color);
+        }
+    }
+
+    info.background_color = render_node
+        .attribute("background-color")
+        .and_then(|value| parse_color_value(value, &info.colors));
+
+    for style_node in render_node
+        .descendants()
+        .filter(|node| node.has_tag_name("style"))
+    {
+        let g_node = style_node.children().find(|node| node.has_tag_name("g"));
+        let mut style = RenderStyle::default();
+        if let Some(g_node) = g_node {
+            style.font_size = g_node
+                .attribute("font-size")
+                .and_then(|value| parse_f64(Some(value)));
+            style.font_family = g_node
+                .attribute("font-family")
+                .map(|value| value.to_string());
+            style.font_color = g_node
+                .attribute("font-color")
+                .and_then(|value| parse_color_value(value, &info.colors));
+            style.stroke_color = g_node
+                .attribute("stroke")
+                .and_then(|value| parse_color_value(value, &info.colors));
+            style.stroke_width = g_node
+                .attribute("stroke-width")
+                .and_then(|value| parse_f64(Some(value)));
+            style.fill_color = g_node
+                .attribute("fill")
+                .and_then(|value| parse_color_value(value, &info.colors));
+            style.background_opacity = g_node
+                .attribute("background-opacity")
+                .and_then(|value| parse_f64(Some(value)));
+        }
+
+        let id_list = style_node.attribute("idList").unwrap_or("");
+        let ids: Vec<&str> = id_list.split_whitespace().collect();
+        if ids.is_empty() {
+            info.default_style = Some(style);
+        } else {
+            for id in ids {
+                info.styles.insert(id.to_string(), style.clone());
+            }
+        }
+    }
+
+    info
+}
+
+fn parse_color_value(value: &str, colors: &HashMap<String, Color>) -> Option<Color> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    if trimmed.eq_ignore_ascii_case("none") {
+        return None;
+    }
+    if let Some(color) = colors.get(trimmed) {
+        return Some(*color);
+    }
+    if trimmed.starts_with('#') {
+        return parse_hex_color(trimmed);
+    }
+    None
+}
+
+fn parse_hex_color(value: &str) -> Option<Color> {
+    let hex = value.trim().trim_start_matches('#');
+    let (r, g, b, a) = match hex.len() {
+        3 => {
+            let r = parse_hex_nibble(hex.chars().nth(0)?)?;
+            let g = parse_hex_nibble(hex.chars().nth(1)?)?;
+            let b = parse_hex_nibble(hex.chars().nth(2)?)?;
+            (r, g, b, 0xFF)
+        }
+        4 => {
+            let r = parse_hex_nibble(hex.chars().nth(0)?)?;
+            let g = parse_hex_nibble(hex.chars().nth(1)?)?;
+            let b = parse_hex_nibble(hex.chars().nth(2)?)?;
+            let a = parse_hex_nibble(hex.chars().nth(3)?)?;
+            (r, g, b, a)
+        }
+        6 => {
+            let r = parse_hex_byte(&hex[0..2])?;
+            let g = parse_hex_byte(&hex[2..4])?;
+            let b = parse_hex_byte(&hex[4..6])?;
+            (r, g, b, 0xFF)
+        }
+        8 => {
+            let r = parse_hex_byte(&hex[0..2])?;
+            let g = parse_hex_byte(&hex[2..4])?;
+            let b = parse_hex_byte(&hex[4..6])?;
+            let a = parse_hex_byte(&hex[6..8])?;
+            (r, g, b, a)
+        }
+        _ => return None,
+    };
+    Some(Color::rgba(
+        r as f64 / 255.0,
+        g as f64 / 255.0,
+        b as f64 / 255.0,
+        a as f64 / 255.0,
+    ))
+}
+
+fn parse_hex_byte(value: &str) -> Option<u8> {
+    u8::from_str_radix(value, 16).ok()
+}
+
+fn parse_hex_nibble(value: char) -> Option<u8> {
+    let digit = value.to_digit(16)? as u8;
+    Some(digit * 17)
+}
+
+fn merged_style(primary: Option<&RenderStyle>, fallback: Option<&RenderStyle>) -> RenderStyle {
+    RenderStyle {
+        font_size: primary
+            .and_then(|style| style.font_size)
+            .or_else(|| fallback.and_then(|style| style.font_size)),
+        font_family: primary
+            .and_then(|style| style.font_family.clone())
+            .or_else(|| fallback.and_then(|style| style.font_family.clone())),
+        font_color: primary
+            .and_then(|style| style.font_color)
+            .or_else(|| fallback.and_then(|style| style.font_color)),
+        stroke_color: primary
+            .and_then(|style| style.stroke_color)
+            .or_else(|| fallback.and_then(|style| style.stroke_color)),
+        stroke_width: primary
+            .and_then(|style| style.stroke_width)
+            .or_else(|| fallback.and_then(|style| style.stroke_width)),
+        fill_color: primary
+            .and_then(|style| style.fill_color)
+            .or_else(|| fallback.and_then(|style| style.fill_color)),
+        background_opacity: primary
+            .and_then(|style| style.background_opacity)
+            .or_else(|| fallback.and_then(|style| style.background_opacity)),
+    }
+}
+
+fn apply_background_opacity(color: Color, opacity: Option<f64>) -> Color {
+    let Some(opacity) = opacity else {
+        return color;
+    };
+    let clamped = opacity.clamp(0.0, 1.0);
+    Color {
+        a: (color.a * clamped).clamp(0.0, 1.0),
+        ..color
+    }
+}
+
+fn resolve_font_px(style: &RenderStyle, default_px: f64) -> f64 {
+    style.font_size.unwrap_or(default_px)
+}
+
+fn resolve_font_family<'a>(style: &'a RenderStyle) -> Option<&'a str> {
+    style.font_family.as_deref()
+}
+
+fn resolve_font_color(style: &RenderStyle) -> Option<Color> {
+    style.font_color
+}
+
+fn resolve_stroke_color(style: &RenderStyle) -> Color {
+    style.stroke_color.unwrap_or(BORDER_COLOR)
+}
+
+fn resolve_stroke_width(style: &RenderStyle, default_width: f64) -> f64 {
+    style.stroke_width.unwrap_or(default_width)
+}
+
+fn resolve_fill_color(style: &RenderStyle, default_color: Option<Color>) -> Option<Color> {
+    let base = style.fill_color.or(default_color)?;
+    Some(apply_background_opacity(base, style.background_opacity))
 }
 
 /// Render parsed SBGNML glyphs and arcs using bbox geometry.
@@ -242,6 +648,8 @@ fn render_sbgnml(
     transform: &Transform,
     glyphs: &[Glyph],
     arcs: &[Arc],
+    render_info: &RenderInfo,
+    tag_orientations: &HashMap<String, TagOrientation>,
     show_clone_markers: bool,
 ) -> Result<()> {
     let mut child_map: HashMap<String, Vec<&Glyph>> = HashMap::new();
@@ -263,7 +671,15 @@ fn render_sbgnml(
         .collect();
 
     for glyph in glyphs.iter().filter(|glyph| glyph.parent_id.is_none()) {
-        render_glyph_tree(ctx, transform, glyph, &child_map, show_clone_markers)?;
+        render_glyph_tree(
+            ctx,
+            transform,
+            glyph,
+            &child_map,
+            render_info,
+            tag_orientations,
+            show_clone_markers,
+        )?;
     }
 
     // Render auxiliary glyphs at their absolute bbox positions.
@@ -281,15 +697,37 @@ fn render_sbgnml(
         } else {
             glyph.label.clone()
         };
-        let font_px = glyph_font_px(class_name);
+        let style = merged_style(
+            render_info.styles.get(&glyph.id),
+            render_info.default_style.as_ref(),
+        );
+        let font_px = resolve_font_px(&style, glyph_font_px(class_name));
+        let font_family = resolve_font_family(&style);
+        let font_color = resolve_font_color(&style);
         let has_clone = show_clone_markers && glyph.has_clone;
         match class_name {
-            "unit of information" => {
-                draw_round_rect_bbox(ctx, transform, bbox, &label, font_px, has_clone)?
-            }
-            "state variable" => {
-                draw_stadium_bbox(ctx, transform, bbox, &label, font_px, has_clone)?
-            }
+            "unit of information" => draw_round_rect_bbox(
+                ctx,
+                transform,
+                bbox,
+                &label,
+                font_px,
+                font_family,
+                font_color,
+                &style,
+                has_clone,
+            )?,
+            "state variable" => draw_stadium_bbox(
+                ctx,
+                transform,
+                bbox,
+                &label,
+                font_px,
+                font_family,
+                font_color,
+                &style,
+                has_clone,
+            )?,
             _ => {}
         }
     }
@@ -304,6 +742,12 @@ fn render_sbgnml(
             .iter()
             .map(|pt| transform.map_point(pt.x, pt.y))
             .collect();
+        let style = merged_style(
+            render_info.styles.get(&arc.id),
+            render_info.default_style.as_ref(),
+        );
+        let stroke_color = resolve_stroke_color(&style);
+        let stroke_width = resolve_stroke_width(&style, DEFAULT_LINE_WIDTH);
         draw_arc(
             ctx,
             &points_px,
@@ -311,6 +755,8 @@ fn render_sbgnml(
             arrow_size_px,
             bar_length_px,
             bar_offset_px,
+            stroke_color,
+            stroke_width,
         )?;
     }
     Ok(())
@@ -321,6 +767,8 @@ fn render_glyph_tree(
     transform: &Transform,
     glyph: &Glyph,
     child_map: &HashMap<String, Vec<&Glyph>>,
+    render_info: &RenderInfo,
+    tag_orientations: &HashMap<String, TagOrientation>,
     show_clone_markers: bool,
 ) -> Result<()> {
     let bbox = match glyph.bbox {
@@ -346,7 +794,13 @@ fn render_glyph_tree(
             glyph.state_variable.as_deref(),
         );
     }
-    let font_px = glyph_font_px(class_name);
+    let style = merged_style(
+        render_info.styles.get(&glyph.id),
+        render_info.default_style.as_ref(),
+    );
+    let font_px = resolve_font_px(&style, glyph_font_px(class_name));
+    let font_family = resolve_font_family(&style);
+    let font_color = resolve_font_color(&style);
     let has_clone = show_clone_markers && glyph.has_clone;
     let children = child_map
         .get(&glyph.id)
@@ -376,23 +830,32 @@ fn render_glyph_tree(
     };
 
     match class_name {
-        "phenotype" | "outcome" => {
-            draw_hexagon_bbox(ctx, transform, bbox, shape_label, font_px, false)?
-        }
-        "perturbing agent" => {
-            draw_entity_pool_node(
-                ctx,
-                transform,
-                bbox,
-                shape_label,
-                font_px,
-                class_base,
-                is_multimer,
-                has_clone,
-                u_info_label.as_deref(),
-                None,
-            )?;
-        }
+        "phenotype" | "outcome" => draw_hexagon_bbox(
+            ctx,
+            transform,
+            bbox,
+            shape_label,
+            font_px,
+            font_family,
+            font_color,
+            &style,
+            false,
+        )?,
+        "perturbing agent" => draw_entity_pool_node(
+            ctx,
+            transform,
+            bbox,
+            shape_label,
+            font_px,
+            font_family,
+            font_color,
+            &style,
+            class_base,
+            is_multimer,
+            has_clone,
+            u_info_label.as_deref(),
+            None,
+        )?,
         "simple chemical" | "simple chemical multimer" => {
             draw_entity_pool_node(
                 ctx,
@@ -400,6 +863,9 @@ fn render_glyph_tree(
                 bbox,
                 shape_label,
                 font_px,
+                font_family,
+                font_color,
+                &style,
                 class_base,
                 is_multimer,
                 has_clone,
@@ -414,6 +880,9 @@ fn render_glyph_tree(
                 bbox,
                 shape_label,
                 font_px,
+                font_family,
+                font_color,
+                &style,
                 class_base,
                 is_multimer,
                 has_clone,
@@ -428,6 +897,9 @@ fn render_glyph_tree(
                 bbox,
                 shape_label,
                 font_px,
+                font_family,
+                font_color,
+                &style,
                 class_base,
                 is_multimer,
                 has_clone,
@@ -442,6 +914,9 @@ fn render_glyph_tree(
                 bbox,
                 shape_label,
                 font_px,
+                font_family,
+                font_color,
+                &style,
                 class_base,
                 is_multimer,
                 has_clone,
@@ -456,6 +931,9 @@ fn render_glyph_tree(
                 bbox,
                 shape_label,
                 font_px,
+                font_family,
+                font_color,
+                &style,
                 class_base,
                 is_multimer,
                 has_clone,
@@ -463,35 +941,128 @@ fn render_glyph_tree(
                 s_var_label.as_deref(),
             )?;
         }
-        "source and sink" => draw_source_sink_bbox(ctx, transform, bbox, has_clone)?,
-        "compartment" => draw_barrel_bbox(ctx, transform, bbox, shape_label, font_px, has_clone)?,
-        "tag" => draw_tag_bbox(ctx, transform, bbox, shape_label, font_px, has_clone)?,
+        "source and sink" => draw_source_sink_bbox(
+            ctx,
+            transform,
+            bbox,
+            shape_label,
+            font_px,
+            font_family,
+            font_color,
+            &style,
+            has_clone,
+        )?,
+        "compartment" => draw_barrel_bbox(
+            ctx,
+            transform,
+            bbox,
+            shape_label,
+            font_px,
+            font_family,
+            font_color,
+            &style,
+            has_clone,
+        )?,
+        "tag" => draw_tag_bbox(
+            ctx,
+            transform,
+            bbox,
+            shape_label,
+            font_px,
+            font_family,
+            font_color,
+            &style,
+            tag_orientations
+                .get(&glyph.id)
+                .copied()
+                .unwrap_or(TagOrientation::Left),
+            has_clone,
+        )?,
         "association" => draw_ellipse_bbox_filled(
             ctx,
             transform,
             bbox,
             shape_label,
             font_px,
+            font_family,
+            font_color,
+            &style,
             ASSOCIATION_FILL_COLOR,
         )?,
-        "dissociation" => draw_double_circle_bbox(ctx, transform, bbox, shape_label, font_px)?,
+        "dissociation" => draw_double_circle_bbox(
+            ctx,
+            transform,
+            bbox,
+            shape_label,
+            font_px,
+            font_family,
+            font_color,
+            &style,
+        )?,
         "process" | "omitted process" | "uncertain process" => {
-            draw_square_bbox(ctx, transform, bbox, shape_label, font_px, false)?;
+            draw_square_bbox(
+                ctx,
+                transform,
+                bbox,
+                shape_label,
+                font_px,
+                font_family,
+                font_color,
+                &style,
+                false,
+            )?;
             if SHOW_PROCESS_DEBUG {
                 draw_process_debug_bbox(ctx, transform, bbox)?;
             }
         }
-        "unit of information" => {
-            draw_round_rect_bbox(ctx, transform, bbox, shape_label, font_px, false)?
-        }
-        "state variable" => draw_stadium_bbox(ctx, transform, bbox, shape_label, font_px, false)?,
+        "unit of information" => draw_round_rect_bbox(
+            ctx,
+            transform,
+            bbox,
+            shape_label,
+            font_px,
+            font_family,
+            font_color,
+            &style,
+            false,
+        )?,
+        "state variable" => draw_stadium_bbox(
+            ctx,
+            transform,
+            bbox,
+            shape_label,
+            font_px,
+            font_family,
+            font_color,
+            &style,
+            false,
+        )?,
         "and" | "or" | "not" => {
-            draw_circle_bbox(ctx, transform, bbox, shape_label, font_px)?;
+            draw_circle_bbox(
+                ctx,
+                transform,
+                bbox,
+                shape_label,
+                font_px,
+                font_family,
+                font_color,
+                &style,
+            )?;
             if SHOW_LOGICAL_DEBUG_BBOX {
                 draw_logical_debug_bbox(ctx, transform, bbox)?;
             }
         }
-        _ => draw_box_bbox(ctx, transform, bbox, shape_label, font_px, false)?,
+        _ => draw_box_bbox(
+            ctx,
+            transform,
+            bbox,
+            shape_label,
+            font_px,
+            font_family,
+            font_color,
+            &style,
+            false,
+        )?,
     }
 
     let orientation = glyph.orientation.as_deref().or_else(|| {
@@ -506,12 +1077,20 @@ fn render_glyph_tree(
     });
     if let Some(orientation) = orientation {
         let connector_len_px = port_connector_len_px_for_class(class_name);
-        draw_orientation_marker(ctx, transform, bbox, orientation, connector_len_px)?;
+        draw_orientation_marker(
+            ctx,
+            transform,
+            bbox,
+            orientation,
+            connector_len_px,
+            resolve_stroke_color(&style),
+            resolve_stroke_width(&style, DEFAULT_LINE_WIDTH),
+        )?;
     }
 
     if place_label_bottom {
         let rect = bbox_pixel_rect(transform, bbox);
-        draw_text_bottom_centered(ctx, rect, &label, font_px)?;
+        draw_text_bottom_centered(ctx, rect, &label, font_px, font_family, font_color)?;
     }
 
     for child in children.iter().copied() {
@@ -521,7 +1100,15 @@ fn render_glyph_tree(
         ) {
             continue;
         }
-        render_glyph_tree(ctx, transform, child, child_map, show_clone_markers)?;
+        render_glyph_tree(
+            ctx,
+            transform,
+            child,
+            child_map,
+            render_info,
+            tag_orientations,
+            show_clone_markers,
+        )?;
     }
 
     Ok(())
@@ -533,17 +1120,26 @@ fn draw_box_bbox(
     bbox: BBox,
     label: &str,
     font_px: f64,
+    font_family: Option<&str>,
+    font_color: Option<Color>,
+    style: &RenderStyle,
     has_clone: bool,
 ) -> Result<()> {
     let rect = bbox_pixel_rect(transform, bbox);
+    let stroke_color = resolve_stroke_color(style);
+    let stroke_width = resolve_stroke_width(style, DEFAULT_LINE_WIDTH);
+    let fill_color = resolve_fill_color(style, Some(DEFAULT_FILL_COLOR));
     draw_shape_with_clone(
         ctx,
         rect,
         label,
         font_px,
+        font_family,
+        font_color,
         has_clone,
-        DEFAULT_LINE_WIDTH,
-        Some(DEFAULT_FILL_COLOR),
+        stroke_width,
+        stroke_color,
+        fill_color,
         path_rect,
     )
 }
@@ -561,7 +1157,7 @@ fn draw_process_debug_bbox(ctx: &CairoContext, transform: &Transform, bbox: BBox
     ctx.set_line_width(1.0);
     path_rect(ctx, inset_rect)?;
     ctx.stroke()?;
-    ctx.set_source_rgb(BORDER_COLOR.0, BORDER_COLOR.1, BORDER_COLOR.2);
+    set_source_color(ctx, BORDER_COLOR);
     ctx.set_line_width(DEFAULT_LINE_WIDTH);
     Ok(())
 }
@@ -572,7 +1168,7 @@ fn draw_logical_debug_bbox(ctx: &CairoContext, transform: &Transform, bbox: BBox
     ctx.set_line_width(1.0);
     path_rect(ctx, rect)?;
     ctx.stroke()?;
-    ctx.set_source_rgb(BORDER_COLOR.0, BORDER_COLOR.1, BORDER_COLOR.2);
+    set_source_color(ctx, BORDER_COLOR);
     ctx.set_line_width(DEFAULT_LINE_WIDTH);
     Ok(())
 }
@@ -583,6 +1179,9 @@ fn draw_square_bbox(
     bbox: BBox,
     label: &str,
     font_px: f64,
+    font_family: Option<&str>,
+    font_color: Option<Color>,
+    style: &RenderStyle,
     has_clone: bool,
 ) -> Result<()> {
     let center_data = Point {
@@ -604,9 +1203,12 @@ fn draw_square_bbox(
         rect,
         label,
         font_px,
+        font_family,
+        font_color,
         has_clone,
-        DEFAULT_LINE_WIDTH,
-        Some(DEFAULT_FILL_COLOR),
+        resolve_stroke_width(style, DEFAULT_LINE_WIDTH),
+        resolve_stroke_color(style),
+        resolve_fill_color(style, Some(DEFAULT_FILL_COLOR)),
         path_rect,
     )
 }
@@ -618,16 +1220,20 @@ fn draw_ellipse_bbox_filled(
     bbox: BBox,
     label: &str,
     font_px: f64,
-    fill: (f64, f64, f64),
+    font_family: Option<&str>,
+    font_color: Option<Color>,
+    style: &RenderStyle,
+    fill: Color,
 ) -> Result<()> {
     let rect = bbox_pixel_rect(transform, bbox);
     path_ellipse(ctx, rect)?;
-    ctx.set_line_width(DEFAULT_LINE_WIDTH);
-    ctx.set_source_rgb(fill.0, fill.1, fill.2);
+    ctx.set_line_width(resolve_stroke_width(style, DEFAULT_LINE_WIDTH));
+    let fill_color = resolve_fill_color(style, Some(fill)).unwrap_or(fill);
+    set_source_color(ctx, fill_color);
     ctx.fill_preserve()?;
-    ctx.set_source_rgb(BORDER_COLOR.0, BORDER_COLOR.1, BORDER_COLOR.2);
+    set_source_color(ctx, resolve_stroke_color(style));
     ctx.stroke()?;
-    draw_text_centered(ctx, rect.center, label, font_px)?;
+    draw_text_centered(ctx, rect.center, label, font_px, font_family, font_color)?;
     Ok(())
 }
 
@@ -637,11 +1243,14 @@ fn draw_double_circle_bbox(
     bbox: BBox,
     label: &str,
     font_px: f64,
+    font_family: Option<&str>,
+    font_color: Option<Color>,
+    style: &RenderStyle,
 ) -> Result<()> {
     let rect = bbox_pixel_rect(transform, bbox);
     let radius = (rect.width.min(rect.height) / 2.0).max(1.0);
     ctx.new_path();
-    ctx.set_line_width(DEFAULT_LINE_WIDTH);
+    ctx.set_line_width(resolve_stroke_width(style, DEFAULT_LINE_WIDTH));
     ctx.arc(
         rect.center.x,
         rect.center.y,
@@ -649,13 +1258,11 @@ fn draw_double_circle_bbox(
         0.0,
         std::f64::consts::TAU,
     );
-    ctx.set_source_rgb(
-        DEFAULT_FILL_COLOR.0,
-        DEFAULT_FILL_COLOR.1,
-        DEFAULT_FILL_COLOR.2,
-    );
+    let fill_color = resolve_fill_color(style, Some(DEFAULT_FILL_COLOR))
+        .unwrap_or(DEFAULT_FILL_COLOR);
+    set_source_color(ctx, fill_color);
     ctx.fill_preserve()?;
-    ctx.set_source_rgb(BORDER_COLOR.0, BORDER_COLOR.1, BORDER_COLOR.2);
+    set_source_color(ctx, resolve_stroke_color(style));
     ctx.stroke()?;
     ctx.new_path();
     ctx.arc(
@@ -665,9 +1272,9 @@ fn draw_double_circle_bbox(
         0.0,
         std::f64::consts::TAU,
     );
-    ctx.set_source_rgb(BORDER_COLOR.0, BORDER_COLOR.1, BORDER_COLOR.2);
+    set_source_color(ctx, resolve_stroke_color(style));
     ctx.stroke()?;
-    draw_text_centered(ctx, rect.center, label, font_px)?;
+    draw_text_centered(ctx, rect.center, label, font_px, font_family, font_color)?;
     Ok(())
 }
 
@@ -677,6 +1284,9 @@ fn draw_round_rect_bbox(
     bbox: BBox,
     label: &str,
     font_px: f64,
+    font_family: Option<&str>,
+    font_color: Option<Color>,
+    style: &RenderStyle,
     has_clone: bool,
 ) -> Result<()> {
     let rect = bbox_pixel_rect(transform, bbox);
@@ -685,9 +1295,12 @@ fn draw_round_rect_bbox(
         rect,
         label,
         font_px,
+        font_family,
+        font_color,
         has_clone,
-        DEFAULT_LINE_WIDTH,
-        Some(DEFAULT_FILL_COLOR),
+        resolve_stroke_width(style, DEFAULT_LINE_WIDTH),
+        resolve_stroke_color(style),
+        resolve_fill_color(style, Some(DEFAULT_FILL_COLOR)),
         |ctx, rect| {
             let radius = (rect.width.min(rect.height) * 0.1).max(1.0);
             path_round_rect(ctx, rect, radius)
@@ -701,6 +1314,9 @@ fn draw_hexagon_bbox(
     bbox: BBox,
     label: &str,
     font_px: f64,
+    font_family: Option<&str>,
+    font_color: Option<Color>,
+    style: &RenderStyle,
     has_clone: bool,
 ) -> Result<()> {
     let rect = bbox_pixel_rect(transform, bbox);
@@ -709,9 +1325,12 @@ fn draw_hexagon_bbox(
         rect,
         label,
         font_px,
+        font_family,
+        font_color,
         has_clone,
-        DEFAULT_LINE_WIDTH,
-        Some(DEFAULT_FILL_COLOR),
+        resolve_stroke_width(style, DEFAULT_LINE_WIDTH),
+        resolve_stroke_color(style),
+        resolve_fill_color(style, Some(DEFAULT_FILL_COLOR)),
         path_hexagon,
     )
 }
@@ -720,29 +1339,33 @@ fn draw_source_sink_bbox(
     ctx: &CairoContext,
     transform: &Transform,
     bbox: BBox,
+    label: &str,
+    font_px: f64,
+    font_family: Option<&str>,
+    font_color: Option<Color>,
+    style: &RenderStyle,
     has_clone: bool,
 ) -> Result<()> {
     let rect = bbox_pixel_rect(transform, bbox);
     path_ellipse(ctx, rect)?;
-    ctx.set_line_width(DEFAULT_LINE_WIDTH);
-    ctx.set_source_rgb(
-        DEFAULT_FILL_COLOR.0,
-        DEFAULT_FILL_COLOR.1,
-        DEFAULT_FILL_COLOR.2,
-    );
+    ctx.set_line_width(resolve_stroke_width(style, DEFAULT_LINE_WIDTH));
+    let fill_color = resolve_fill_color(style, Some(DEFAULT_FILL_COLOR))
+        .unwrap_or(DEFAULT_FILL_COLOR);
+    set_source_color(ctx, fill_color);
     ctx.fill_preserve()?;
-    ctx.set_source_rgb(BORDER_COLOR.0, BORDER_COLOR.1, BORDER_COLOR.2);
+    set_source_color(ctx, resolve_stroke_color(style));
     ctx.stroke()?;
     if has_clone {
         draw_clone_marker(ctx, rect, &path_ellipse)?;
         path_ellipse(ctx, rect)?;
-        ctx.set_source_rgb(BORDER_COLOR.0, BORDER_COLOR.1, BORDER_COLOR.2);
+        set_source_color(ctx, resolve_stroke_color(style));
         ctx.stroke()?;
     }
     ctx.new_path();
     ctx.move_to(rect.x0, rect.y0 + rect.height);
     ctx.line_to(rect.x0 + rect.width, rect.y0);
     ctx.stroke()?;
+    draw_text_centered(ctx, rect.center, label, font_px, font_family, font_color)?;
     Ok(())
 }
 
@@ -752,6 +1375,9 @@ fn draw_barrel_bbox(
     bbox: BBox,
     label: &str,
     font_px: f64,
+    font_family: Option<&str>,
+    font_color: Option<Color>,
+    style: &RenderStyle,
     has_clone: bool,
 ) -> Result<()> {
     let rect = bbox_pixel_rect(transform, bbox);
@@ -761,9 +1387,12 @@ fn draw_barrel_bbox(
         rect,
         label,
         font_px,
+        font_family,
+        font_color,
         has_clone,
-        border_width,
-        Some(DEFAULT_FILL_COLOR),
+        resolve_stroke_width(style, border_width),
+        resolve_stroke_color(style),
+        resolve_fill_color(style, Some(DEFAULT_FILL_COLOR)),
         path_barrel,
     )
 }
@@ -774,20 +1403,28 @@ fn draw_tag_bbox(
     bbox: BBox,
     label: &str,
     font_px: f64,
+    font_family: Option<&str>,
+    font_color: Option<Color>,
+    style: &RenderStyle,
+    orientation: TagOrientation,
     has_clone: bool,
 ) -> Result<()> {
     let rect = bbox_pixel_rect(transform, bbox);
+    let notch_left = matches!(orientation, TagOrientation::Left);
     draw_shape_with_clone(
         ctx,
         rect,
         label,
         font_px,
+        font_family,
+        font_color,
         has_clone,
-        DEFAULT_LINE_WIDTH,
-        Some(DEFAULT_FILL_COLOR),
+        resolve_stroke_width(style, DEFAULT_LINE_WIDTH),
+        resolve_stroke_color(style),
+        resolve_fill_color(style, Some(DEFAULT_FILL_COLOR)),
         |ctx, rect| {
             let notch = (rect.height * 0.3).max(2.0);
-            path_tag(ctx, rect, notch)
+            path_tag(ctx, rect, notch, notch_left)
         },
     )
 }
@@ -798,6 +1435,9 @@ fn draw_stadium_bbox(
     bbox: BBox,
     label: &str,
     font_px: f64,
+    font_family: Option<&str>,
+    font_color: Option<Color>,
+    style: &RenderStyle,
     has_clone: bool,
 ) -> Result<()> {
     let rect = bbox_pixel_rect(transform, bbox);
@@ -806,9 +1446,12 @@ fn draw_stadium_bbox(
         rect,
         label,
         font_px,
+        font_family,
+        font_color,
         has_clone,
-        DEFAULT_LINE_WIDTH,
-        Some(DEFAULT_FILL_COLOR),
+        resolve_stroke_width(style, DEFAULT_LINE_WIDTH),
+        resolve_stroke_color(style),
+        resolve_fill_color(style, Some(DEFAULT_FILL_COLOR)),
         |ctx, rect| {
             let radius = 0.24 * rect.width.max(rect.height);
             path_round_rect_impl(ctx, rect.x0, rect.y0, rect.width, rect.height, radius)
@@ -823,6 +1466,9 @@ fn draw_entity_pool_node(
     bbox: BBox,
     label: &str,
     font_px: f64,
+    font_family: Option<&str>,
+    font_color: Option<Color>,
+    style: &RenderStyle,
     class_name: &str,
     is_multimer: bool,
     has_clone: bool,
@@ -852,9 +1498,12 @@ fn draw_entity_pool_node(
                 class_name,
                 "",
                 FONT_SMALL_PX,
+                font_family,
+                font_color,
                 false,
-                entity_pool_fill_color(class_name),
-                entity_pool_border_width(class_name),
+                resolve_fill_color(style, entity_pool_fill_color(class_name)),
+                resolve_stroke_color(style),
+                resolve_stroke_width(style, entity_pool_border_width(class_name)),
             )?;
         }
     }
@@ -865,9 +1514,12 @@ fn draw_entity_pool_node(
         class_name,
         label,
         font_px,
+        font_family,
+        font_color,
         has_clone,
-        entity_pool_fill_color(class_name),
-        entity_pool_border_width(class_name),
+        resolve_fill_color(style, entity_pool_fill_color(class_name)),
+        resolve_stroke_color(style),
+        resolve_stroke_width(style, entity_pool_border_width(class_name)),
     )?;
 
     draw_entity_pool_aux_items(ctx, rect, class_name, u_info_label, s_var_label)?;
@@ -881,8 +1533,11 @@ fn draw_entity_pool_base_shape(
     class_name: &str,
     label: &str,
     font_px: f64,
+    font_family: Option<&str>,
+    font_color: Option<Color>,
     has_clone: bool,
-    fill_color: Option<(f64, f64, f64)>,
+    fill_color: Option<Color>,
+    stroke_color: Color,
     border_width: f64,
 ) -> Result<()> {
     match class_name {
@@ -891,8 +1546,11 @@ fn draw_entity_pool_base_shape(
             rect,
             label,
             font_px,
+            font_family,
+            font_color,
             has_clone,
             border_width,
+            stroke_color,
             fill_color,
             path_ellipse,
         ),
@@ -901,8 +1559,11 @@ fn draw_entity_pool_base_shape(
             rect,
             label,
             font_px,
+            font_family,
+            font_color,
             has_clone,
             border_width,
+            stroke_color,
             fill_color,
             |ctx, rect| {
                 let radius = (rect.width.min(rect.height) * 0.1).max(1.0);
@@ -914,8 +1575,11 @@ fn draw_entity_pool_base_shape(
             rect,
             label,
             font_px,
+            font_family,
+            font_color,
             has_clone,
             border_width,
+            stroke_color,
             fill_color,
             |ctx, rect| {
                 let radius = (rect.height * 0.3).max(1.0);
@@ -927,8 +1591,11 @@ fn draw_entity_pool_base_shape(
             rect,
             label,
             font_px,
+            font_family,
+            font_color,
             has_clone,
             border_width,
+            stroke_color,
             fill_color,
             |ctx, rect| {
                 let corner = (rect.width.min(rect.height) * 0.2).max(1.0);
@@ -940,8 +1607,11 @@ fn draw_entity_pool_base_shape(
             rect,
             label,
             font_px,
+            font_family,
+            font_color,
             has_clone,
             border_width,
+            stroke_color,
             fill_color,
             path_concave_hexagon,
         ),
@@ -950,8 +1620,11 @@ fn draw_entity_pool_base_shape(
             rect,
             label,
             font_px,
+            font_family,
+            font_color,
             has_clone,
             border_width,
+            stroke_color,
             fill_color,
             path_rect,
         ),
@@ -959,7 +1632,7 @@ fn draw_entity_pool_base_shape(
 }
 
 /// Map entity pool nodes to their fill colors, matching sbgnStyle defaults.
-fn entity_pool_fill_color(class_name: &str) -> Option<(f64, f64, f64)> {
+fn entity_pool_fill_color(class_name: &str) -> Option<Color> {
     match class_name {
         "complex" => Some(DEFAULT_FILL_COLOR),
         _ => Some(DEFAULT_FILL_COLOR),
@@ -1036,6 +1709,8 @@ fn draw_entity_pool_aux_items(
                     label,
                     border_width,
                     font_px,
+                    None,
+                    None,
                     5.0 * scale,
                 )?;
             }
@@ -1070,6 +1745,8 @@ fn draw_entity_pool_aux_items(
                     label,
                     border_width,
                     font_px,
+                    None,
+                    None,
                     5.0 * scale,
                 )?;
             }
@@ -1084,6 +1761,8 @@ fn draw_entity_pool_aux_items(
                     label,
                     border_width,
                     font_px,
+                    None,
+                    None,
                     10.0 * scale,
                     30.0 * scale,
                 )?;
@@ -1119,6 +1798,8 @@ fn draw_entity_pool_aux_items(
                     label,
                     border_width,
                     font_px,
+                    None,
+                    None,
                     5.0 * scale,
                 )?;
             }
@@ -1133,6 +1814,8 @@ fn draw_entity_pool_aux_items(
                     label,
                     border_width,
                     font_px,
+                    None,
+                    None,
                     10.0 * scale,
                     30.0 * scale,
                 )?;
@@ -1168,6 +1851,8 @@ fn draw_entity_pool_aux_items(
                     label,
                     border_width,
                     font_px,
+                    None,
+                    None,
                     5.0 * scale,
                 )?;
             }
@@ -1182,6 +1867,8 @@ fn draw_entity_pool_aux_items(
                     label,
                     border_width,
                     font_px,
+                    None,
+                    None,
                     10.0 * scale,
                     30.0 * scale,
                 )?;
@@ -1208,6 +1895,8 @@ fn draw_entity_pool_aux_items(
                     label,
                     border_width,
                     font_px,
+                    None,
+                    None,
                     5.0 * scale,
                 )?;
             }
@@ -1222,6 +1911,8 @@ fn draw_entity_pool_aux_items(
                     label,
                     border_width,
                     font_px,
+                    None,
+                    None,
                     10.0 * scale,
                     30.0 * scale,
                 )?;
@@ -1257,6 +1948,8 @@ fn draw_entity_pool_aux_items(
                     label,
                     border_width,
                     font_px,
+                    None,
+                    None,
                     5.0 * scale,
                 )?;
             }
@@ -1273,10 +1966,12 @@ fn draw_orientation_marker(
     bbox: BBox,
     orientation: &str,
     connector_len_px: f64,
+    stroke_color: Color,
+    stroke_width: f64,
 ) -> Result<()> {
     let rect = bbox_pixel_rect(transform, bbox);
-    ctx.set_source_rgb(BORDER_COLOR.0, BORDER_COLOR.1, BORDER_COLOR.2);
-    ctx.set_line_width(DEFAULT_LINE_WIDTH);
+    set_source_color(ctx, stroke_color);
+    ctx.set_line_width(stroke_width);
     match orientation {
         "vertical" => {
             ctx.new_path();
@@ -1329,15 +2024,15 @@ fn draw_overlay_line(
     rect: PixelRect,
     y: f64,
     line_width: f64,
-    color: (f64, f64, f64),
+    color: Color,
 ) -> Result<()> {
     ctx.set_line_width(line_width.max(1.0));
-    ctx.set_source_rgb(color.0, color.1, color.2);
+    set_source_color(ctx, color);
     ctx.new_path();
     ctx.move_to(rect.x0, y);
     ctx.line_to(rect.x0 + rect.width, y);
     ctx.stroke()?;
-    ctx.set_source_rgb(BORDER_COLOR.0, BORDER_COLOR.1, BORDER_COLOR.2);
+    set_source_color(ctx, BORDER_COLOR);
     ctx.set_line_width(DEFAULT_LINE_WIDTH);
     Ok(())
 }
@@ -1359,9 +2054,11 @@ fn draw_unit_info(
     label: &str,
     border_width: f64,
     font_px: f64,
+    font_family: Option<&str>,
+    font_color: Option<Color>,
     padding_px: f64,
 ) -> Result<()> {
-    let text_width = measure_text_width(ctx, label, font_px);
+    let text_width = measure_text_width(ctx, label, font_px, font_family);
     let width = (text_width + padding_px).max(10.0);
     let rect = PixelRect {
         x0: x,
@@ -1382,11 +2079,11 @@ fn draw_unit_info(
         rect.height,
         rect.width * 0.04,
     )?;
-    ctx.set_source_rgb(1.0, 1.0, 1.0);
+    set_source_color(ctx, WHITE_COLOR);
     ctx.fill_preserve()?;
-    ctx.set_source_rgb(BORDER_COLOR.0, BORDER_COLOR.1, BORDER_COLOR.2);
+    set_source_color(ctx, BORDER_COLOR);
     ctx.stroke()?;
-    draw_text_centered(ctx, rect.center, label, font_px)?;
+    draw_text_centered(ctx, rect.center, label, font_px, font_family, font_color)?;
     ctx.set_line_width(DEFAULT_LINE_WIDTH);
     Ok(())
 }
@@ -1400,10 +2097,12 @@ fn draw_state_var(
     label: &str,
     border_width: f64,
     font_px: f64,
+    font_family: Option<&str>,
+    font_color: Option<Color>,
     padding_px: f64,
     min_width: f64,
 ) -> Result<()> {
-    let text_width = measure_text_width(ctx, label, font_px);
+    let text_width = measure_text_width(ctx, label, font_px, font_family);
     let width = (text_width + padding_px).max(min_width);
     let rect = PixelRect {
         x0: x,
@@ -1418,19 +2117,20 @@ fn draw_state_var(
     ctx.set_line_width(border_width.max(1.0));
     let radius = 0.24 * rect.width.max(rect.height);
     path_round_rect_impl(ctx, rect.x0, rect.y0, rect.width, rect.height, radius)?;
-    ctx.set_source_rgb(1.0, 1.0, 1.0);
+    set_source_color(ctx, WHITE_COLOR);
     ctx.fill_preserve()?;
-    ctx.set_source_rgb(BORDER_COLOR.0, BORDER_COLOR.1, BORDER_COLOR.2);
+    set_source_color(ctx, BORDER_COLOR);
     ctx.stroke()?;
-    draw_text_centered(ctx, rect.center, label, font_px)?;
+    draw_text_centered(ctx, rect.center, label, font_px, font_family, font_color)?;
     ctx.set_line_width(DEFAULT_LINE_WIDTH);
     Ok(())
 }
 
 /// Measure label width using the current Cairo/Pango context.
-fn measure_text_width(ctx: &CairoContext, text: &str, font_px: f64) -> f64 {
+fn measure_text_width(ctx: &CairoContext, text: &str, font_px: f64, font_family: Option<&str>) -> f64 {
     let layout = pangocairo::create_layout(ctx);
-    let mut font_desc = FontDescription::from_string(FONT_FAMILY);
+    let family = font_family.unwrap_or(FONT_FAMILY);
+    let mut font_desc = FontDescription::from_string(family);
     font_desc.set_absolute_size(font_px * pango::SCALE as f64);
     layout.set_font_description(Some(&font_desc));
     layout.set_text(text);
@@ -1454,19 +2154,20 @@ fn draw_circle_bbox(
     bbox: BBox,
     label: &str,
     font_px: f64,
+    font_family: Option<&str>,
+    font_color: Option<Color>,
+    style: &RenderStyle,
 ) -> Result<()> {
     let center = transform.map_point(bbox.x + bbox.w / 2.0, bbox.y + bbox.h / 2.0);
     let radius = transform.scale_scalar(bbox.w.min(bbox.h) / 2.0);
     ctx.arc(center.x, center.y, radius, 0.0, std::f64::consts::TAU);
-    ctx.set_source_rgb(
-        DEFAULT_FILL_COLOR.0,
-        DEFAULT_FILL_COLOR.1,
-        DEFAULT_FILL_COLOR.2,
-    );
+    let fill_color = resolve_fill_color(style, Some(DEFAULT_FILL_COLOR))
+        .unwrap_or(DEFAULT_FILL_COLOR);
+    set_source_color(ctx, fill_color);
     ctx.fill_preserve()?;
-    ctx.set_source_rgb(BORDER_COLOR.0, BORDER_COLOR.1, BORDER_COLOR.2);
+    set_source_color(ctx, resolve_stroke_color(style));
     ctx.stroke()?;
-    draw_text_centered(ctx, center, label, font_px)?;
+    draw_text_centered(ctx, center, label, font_px, font_family, font_color)?;
     Ok(())
 }
 
@@ -1475,9 +2176,12 @@ fn draw_shape_with_clone<F>(
     rect: PixelRect,
     label: &str,
     font_px: f64,
+    font_family: Option<&str>,
+    font_color: Option<Color>,
     has_clone: bool,
     line_width: f64,
-    fill_color: Option<(f64, f64, f64)>,
+    stroke_color: Color,
+    fill_color: Option<Color>,
     path_fn: F,
 ) -> Result<()>
 where
@@ -1486,18 +2190,18 @@ where
     ctx.set_line_width(line_width.max(0.5));
     path_fn(ctx, rect)?;
     if let Some(color) = fill_color {
-        ctx.set_source_rgb(color.0, color.1, color.2);
+        set_source_color(ctx, color);
         ctx.fill_preserve()?;
     }
-    ctx.set_source_rgb(BORDER_COLOR.0, BORDER_COLOR.1, BORDER_COLOR.2);
+    set_source_color(ctx, stroke_color);
     ctx.stroke()?;
     if has_clone {
         draw_clone_marker(ctx, rect, &path_fn)?;
         path_fn(ctx, rect)?;
-        ctx.set_source_rgb(BORDER_COLOR.0, BORDER_COLOR.1, BORDER_COLOR.2);
+        set_source_color(ctx, stroke_color);
         ctx.stroke()?;
     }
-    draw_text_centered(ctx, rect.center, label, font_px)?;
+    draw_text_centered(ctx, rect.center, label, font_px, font_family, font_color)?;
     ctx.set_line_width(DEFAULT_LINE_WIDTH);
     Ok(())
 }
@@ -1516,17 +2220,13 @@ where
     ctx.clip();
     ctx.new_path();
     ctx.rectangle(marker_x, marker_y, marker_width, marker_height);
-    ctx.set_source_rgb(
-        CLONE_MARKER_FILL_COLOR.0,
-        CLONE_MARKER_FILL_COLOR.1,
-        CLONE_MARKER_FILL_COLOR.2,
-    );
+    set_source_color(ctx, CLONE_MARKER_FILL_COLOR);
     ctx.fill_preserve()?;
-    ctx.set_source_rgb(AUX_LINE_COLOR.0, AUX_LINE_COLOR.1, AUX_LINE_COLOR.2);
+    set_source_color(ctx, AUX_LINE_COLOR);
     ctx.set_line_width(CLONE_MARKER_STROKE_WIDTH.max(1.0));
     ctx.stroke()?;
     let _ = ctx.restore();
-    ctx.set_source_rgb(BORDER_COLOR.0, BORDER_COLOR.1, BORDER_COLOR.2);
+    set_source_color(ctx, BORDER_COLOR);
     ctx.set_line_width(DEFAULT_LINE_WIDTH);
     Ok(())
 }
@@ -1668,18 +2368,26 @@ fn path_barrel(ctx: &CairoContext, rect: PixelRect) -> Result<()> {
     Ok(())
 }
 
-fn path_tag(ctx: &CairoContext, rect: PixelRect, notch: f64) -> Result<()> {
+fn path_tag(ctx: &CairoContext, rect: PixelRect, notch: f64, notch_left: bool) -> Result<()> {
     let x0 = rect.x0;
     let y0 = rect.y0;
     let x1 = rect.x0 + rect.width;
     let y1 = rect.y0 + rect.height;
     let mid_y = (y0 + y1) / 2.0;
     ctx.new_path();
-    ctx.move_to(x0 + notch, y0);
-    ctx.line_to(x1, y0);
-    ctx.line_to(x1, y1);
-    ctx.line_to(x0 + notch, y1);
-    ctx.line_to(x0, mid_y);
+    if notch_left {
+        ctx.move_to(x0 + notch, y0);
+        ctx.line_to(x1, y0);
+        ctx.line_to(x1, y1);
+        ctx.line_to(x0 + notch, y1);
+        ctx.line_to(x0, mid_y);
+    } else {
+        ctx.move_to(x0, y0);
+        ctx.line_to(x1 - notch, y0);
+        ctx.line_to(x1, mid_y);
+        ctx.line_to(x1 - notch, y1);
+        ctx.line_to(x0, y1);
+    }
     ctx.close_path();
     Ok(())
 }
@@ -1788,13 +2496,15 @@ fn draw_arc(
     arrow_size: f64,
     bar_length: f64,
     bar_offset: f64,
+    stroke_color: Color,
+    stroke_width: f64,
 ) -> Result<()> {
     if points.len() < 2 {
         return Ok(());
     }
 
-    ctx.set_source_rgb(BORDER_COLOR.0, BORDER_COLOR.1, BORDER_COLOR.2);
-    ctx.set_line_width(DEFAULT_LINE_WIDTH);
+    set_source_color(ctx, stroke_color);
+    ctx.set_line_width(stroke_width);
     for pair in points.windows(2) {
         ctx.move_to(pair[0].x, pair[0].y);
         ctx.line_to(pair[1].x, pair[1].y);
@@ -1807,9 +2517,9 @@ fn draw_arc(
     match class_name {
         "assignment" | "unknown influence" => draw_open_triangle(ctx, end, prev, arrow_size)?,
         "positive influence" | "stimulation" => {
-            draw_open_triangle_opaque(ctx, end, prev, arrow_size)?
+            draw_open_triangle_opaque(ctx, end, prev, arrow_size, stroke_color)?
         }
-        "modulation" => draw_open_diamond_opaque(ctx, end, prev, arrow_size)?,
+        "modulation" => draw_open_diamond_opaque(ctx, end, prev, arrow_size, stroke_color)?,
         "production" => draw_filled_triangle(ctx, end, prev, arrow_size)?,
         "negative influence" | "inhibition" => {
             draw_inhibition_bar(ctx, end, prev, bar_length, 0.0)?
@@ -1820,17 +2530,24 @@ fn draw_arc(
         }
         "necessary stimulation" => {
             draw_inhibition_bar(ctx, end, prev, bar_length, bar_offset)?;
-            draw_open_triangle_opaque(ctx, end, prev, arrow_size)?;
+            draw_open_triangle_opaque(ctx, end, prev, arrow_size, stroke_color)?;
         }
-        "catalysis" => draw_filled_circle_tangent(ctx, end, prev, arrow_size * 0.4)?,
-        "equivalence arc" => draw_open_circle(ctx, end, arrow_size * 0.4)?,
+        "catalysis" => {
+            draw_filled_circle_tangent(ctx, end, prev, arrow_size * 0.4, stroke_color)?
+        }
+        "equivalence arc" => {}
         _ => {}
     }
 
     Ok(())
 }
 
-fn draw_open_circle(ctx: &CairoContext, center: Point, radius: f64) -> Result<()> {
+fn draw_filled_circle(
+    ctx: &CairoContext,
+    center: Point,
+    radius: f64,
+    stroke_color: Color,
+) -> Result<()> {
     ctx.arc(
         center.x,
         center.y,
@@ -1838,21 +2555,9 @@ fn draw_open_circle(ctx: &CairoContext, center: Point, radius: f64) -> Result<()
         0.0,
         std::f64::consts::TAU,
     );
-    ctx.stroke()?;
-    Ok(())
-}
-
-fn draw_filled_circle(ctx: &CairoContext, center: Point, radius: f64) -> Result<()> {
-    ctx.arc(
-        center.x,
-        center.y,
-        radius.max(1.0),
-        0.0,
-        std::f64::consts::TAU,
-    );
-    ctx.set_source_rgb(1.0, 1.0, 1.0);
+    set_source_color(ctx, WHITE_COLOR);
     ctx.fill_preserve()?;
-    ctx.set_source_rgb(BORDER_COLOR.0, BORDER_COLOR.1, BORDER_COLOR.2);
+    set_source_color(ctx, stroke_color);
     ctx.stroke()?;
     Ok(())
 }
@@ -1862,12 +2567,13 @@ fn draw_filled_circle_tangent(
     end: Point,
     prev: Point,
     radius: f64,
+    stroke_color: Color,
 ) -> Result<()> {
     let dx = end.x - prev.x;
     let dy = end.y - prev.y;
     let len = (dx * dx + dy * dy).sqrt();
     if len == 0.0 {
-        return draw_filled_circle(ctx, end, radius);
+        return draw_filled_circle(ctx, end, radius, stroke_color);
     }
     let ux = dx / len;
     let uy = dy / len;
@@ -1877,7 +2583,7 @@ fn draw_filled_circle_tangent(
         x: end.x - ux * offset,
         y: end.y - uy * offset,
     };
-    draw_filled_circle(ctx, center, radius)
+    draw_filled_circle(ctx, center, radius, stroke_color)
 }
 
 fn draw_open_triangle(ctx: &CairoContext, end: Point, prev: Point, size: f64) -> Result<()> {
@@ -1892,7 +2598,13 @@ fn draw_open_triangle(ctx: &CairoContext, end: Point, prev: Point, size: f64) ->
     Ok(())
 }
 
-fn draw_open_triangle_opaque(ctx: &CairoContext, end: Point, prev: Point, size: f64) -> Result<()> {
+fn draw_open_triangle_opaque(
+    ctx: &CairoContext,
+    end: Point,
+    prev: Point,
+    size: f64,
+    stroke_color: Color,
+) -> Result<()> {
     let Some((p1, p2, tip)) = triangle_points(end, prev, size) else {
         return Ok(());
     };
@@ -1900,9 +2612,9 @@ fn draw_open_triangle_opaque(ctx: &CairoContext, end: Point, prev: Point, size: 
     ctx.line_to(p2.x, p2.y);
     ctx.line_to(tip.x, tip.y);
     ctx.close_path();
-    ctx.set_source_rgb(1.0, 1.0, 1.0);
+    set_source_color(ctx, WHITE_COLOR);
     ctx.fill_preserve()?;
-    ctx.set_source_rgb(BORDER_COLOR.0, BORDER_COLOR.1, BORDER_COLOR.2);
+    set_source_color(ctx, stroke_color);
     ctx.stroke()?;
     Ok(())
 }
@@ -1919,7 +2631,13 @@ fn draw_filled_triangle(ctx: &CairoContext, end: Point, prev: Point, size: f64) 
     Ok(())
 }
 
-fn draw_open_diamond_opaque(ctx: &CairoContext, end: Point, prev: Point, size: f64) -> Result<()> {
+fn draw_open_diamond_opaque(
+    ctx: &CairoContext,
+    end: Point,
+    prev: Point,
+    size: f64,
+    stroke_color: Color,
+) -> Result<()> {
     let Some((tip, p1, base, p2)) = diamond_points(end, prev, size) else {
         return Ok(());
     };
@@ -1928,9 +2646,9 @@ fn draw_open_diamond_opaque(ctx: &CairoContext, end: Point, prev: Point, size: f
     ctx.line_to(base.x, base.y);
     ctx.line_to(p2.x, p2.y);
     ctx.close_path();
-    ctx.set_source_rgb(1.0, 1.0, 1.0);
+    set_source_color(ctx, WHITE_COLOR);
     ctx.fill_preserve()?;
-    ctx.set_source_rgb(BORDER_COLOR.0, BORDER_COLOR.1, BORDER_COLOR.2);
+    set_source_color(ctx, stroke_color);
     ctx.stroke()?;
     Ok(())
 }
@@ -2025,12 +2743,20 @@ fn draw_inhibition_bar(
     Ok(())
 }
 
-fn draw_text_centered(ctx: &CairoContext, center: Point, text: &str, font_px: f64) -> Result<()> {
+fn draw_text_centered(
+    ctx: &CairoContext,
+    center: Point,
+    text: &str,
+    font_px: f64,
+    font_family: Option<&str>,
+    font_color: Option<Color>,
+) -> Result<()> {
     if text.trim().is_empty() {
         return Ok(());
     }
     let layout = pangocairo::create_layout(ctx);
-    let mut font_desc = FontDescription::from_string(FONT_FAMILY);
+    let family = font_family.unwrap_or(FONT_FAMILY);
+    let mut font_desc = FontDescription::from_string(family);
     font_desc.set_absolute_size(font_px * pango::SCALE as f64);
     layout.set_font_description(Some(&font_desc));
     layout.set_alignment(Alignment::Center);
@@ -2039,20 +2765,26 @@ fn draw_text_centered(ctx: &CairoContext, center: Point, text: &str, font_px: f6
     let (width, height) = layout.pixel_size();
     let x = center.x - width as f64 / 2.0;
     let y = center.y - height as f64 / 2.0;
-    draw_text_at(ctx, x, y, &layout)?;
+    draw_text_at(ctx, x, y, &layout, font_color)?;
     Ok(())
 }
 
 /// Draw text with an outline at the given top-left position.
-fn draw_text_at(ctx: &CairoContext, x: f64, y: f64, layout: &pango::Layout) -> Result<()> {
+fn draw_text_at(
+    ctx: &CairoContext,
+    x: f64,
+    y: f64,
+    layout: &pango::Layout,
+    font_color: Option<Color>,
+) -> Result<()> {
     ctx.move_to(x, y);
     pangocairo::layout_path(ctx, layout);
     if TEXT_OUTLINE_WIDTH > 0.0 {
-        ctx.set_source_rgb(1.0, 1.0, 1.0);
+        set_source_color(ctx, WHITE_COLOR);
         ctx.set_line_width(TEXT_OUTLINE_WIDTH);
         ctx.stroke_preserve()?;
     }
-    ctx.set_source_rgb(BORDER_COLOR.0, BORDER_COLOR.1, BORDER_COLOR.2);
+    set_source_color(ctx, font_color.unwrap_or(BORDER_COLOR));
     ctx.fill()?;
     ctx.set_line_width(DEFAULT_LINE_WIDTH);
     Ok(())
@@ -2064,12 +2796,15 @@ fn draw_text_bottom_centered(
     rect: PixelRect,
     text: &str,
     font_px: f64,
+    font_family: Option<&str>,
+    font_color: Option<Color>,
 ) -> Result<()> {
     if text.trim().is_empty() {
         return Ok(());
     }
     let layout = pangocairo::create_layout(ctx);
-    let mut font_desc = FontDescription::from_string(FONT_FAMILY);
+    let family = font_family.unwrap_or(FONT_FAMILY);
+    let mut font_desc = FontDescription::from_string(family);
     font_desc.set_absolute_size(font_px * pango::SCALE as f64);
     layout.set_font_description(Some(&font_desc));
     layout.set_alignment(Alignment::Center);
@@ -2078,7 +2813,7 @@ fn draw_text_bottom_centered(
     let (width, height) = layout.pixel_size();
     let x = rect.center.x - width as f64 / 2.0;
     let y = rect.y0 + rect.height - height as f64 - 2.0;
-    draw_text_at(ctx, x, y, &layout)
+    draw_text_at(ctx, x, y, &layout, font_color)
 }
 fn bbox_pixel_rect(transform: &Transform, bbox: BBox) -> PixelRect {
     let x0 = (bbox.x - transform.min_x) * transform.scale_x;
@@ -2191,7 +2926,10 @@ fn parse_sbgn(doc: &Document) -> Result<(Vec<Glyph>, Vec<Arc>, Bounds)> {
 
     let mut arcs = Vec::new();
     for arc in arc_nodes {
+        let arc_id = arc.attribute("id").unwrap_or_default().to_string();
         let class_name = arc.attribute("class").unwrap_or_default().to_string();
+        let source = arc.attribute("source").map(|value| value.to_string());
+        let target = arc.attribute("target").map(|value| value.to_string());
         let start = arc
             .children()
             .find(|node| node.has_tag_name("start"))
@@ -2221,7 +2959,13 @@ fn parse_sbgn(doc: &Document) -> Result<(Vec<Glyph>, Vec<Arc>, Bounds)> {
             y: parse_f64(end.attribute("y")).ok_or_else(|| anyhow!("Bad arc end y"))?,
         });
 
-        arcs.push(Arc { class_name, points });
+        arcs.push(Arc {
+            id: arc_id,
+            class_name,
+            source,
+            target,
+            points,
+        });
     }
 
     let bounds = compute_bounds(&glyphs, &arcs)?;
