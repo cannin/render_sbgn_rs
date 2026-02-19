@@ -5,12 +5,17 @@
 - `Cargo.toml` / `Cargo.lock`: Rust package metadata.
 - `target/`: build artifacts.
 - Style reference repo: `../cytoscape-sbgn-stylesheet/` (sizes, offsets, SVG glyph details).
+- XML parser: `xmltree` (DOM-style read).
 
 ## Build, Test, Run
 - Build: `cargo build` (debug) or `cargo build --release`.
 - Run (release): `./target/release/render_sbgn_rs draw_sbgnml --input examples/sbgn/foo.sbgn --output out.png --padding 10`.
+- Batch render (examples): 
+  - `mkdir -p render_examples/output_render_sbgn_rs`
+  - `for f in render_examples/sbgn_examples/*.sbgn render_examples/sbgn_all_symbols/*.sbgn; do base=$(basename "$f" .sbgn); ./target/debug/render_sbgn_rs draw_sbgnml --input "$f" --output "render_examples/output_render_sbgn_rs/${base}.png" --padding 10; done`
 - Tests: none yet (use `cargo test` if you add them).
-- Formatting: use `cargo fmt` and prefer the system rustfmt (`/usr/bin/cargo-fmt`). If rustfmt is missing, install via `rustup component add rustfmt` (preferred) or `cargo install rustfmt`, and then run `cargo fmt -- --force` if the installed rustfmt warns about being deprecated. Ensure `~/.cargo/bin` is on `PATH` when using the cargo-installed rustfmt.
+- Formatting: `cargo fmt` (system `rustfmt` package is acceptable; install via `apt-get install rustfmt` if missing).
+- Environment note: `python` is not available by default in this environment.
 
 ## Coding Style
 - Rust 2021; run `cargo fmt` when changing structure.
@@ -22,6 +27,10 @@
 - Key constants (see `src/main.rs`): `ARROW_SCALE=1.75`, `ARROW_SIZE=8`, `BAR_LENGTH=12`, `BAR_OFFSET=14`, `CATALYSIS_OVERLAP_RATIO`, `PORT_CONNECTOR_LEN_PX=10`.
 - Fills/markers: default white; complexes white; association `#6B6B6B`; catalysis is opaque white circle that overlaps the arc line by `CATALYSIS_OVERLAP_RATIO`; stimulation/necessary stimulation triangles are opaque white; production arrows are filled.
 - Coordinates: `(0,0)` is top-left; all `bbox x/y` are absolute. Unit-of-information/state-variable `bbox` are absolute (not relative). Nested glyphs render above parents (z-order). If a process/association/dissociation node lacks `orientation`, treat it as `horizontal`. Orientation markers draw outside the bbox at the center axis.
+- Render extensions: supports `<renderInformation>` for background color, color definitions, and per-id styles (stroke/fill/width/font). Default style applies when `idList` is empty. `nwt:extraInfo` is ignored.
+- Background: defaults to white; transparent renderInformation backgrounds are treated as white.
+- Tag glyphs: notch side faces the connected arc side when possible.
+- Equivalence arcs: no arrowhead markers.
 - Example (absolute unit of info):
   ```xml
   <glyph id="glyph6" class="nucleic acid feature">

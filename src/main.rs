@@ -7,7 +7,7 @@ use cairo::{Context as CairoContext, Format, ImageSurface, LineCap, SvgSurface};
 use clap::{Parser, Subcommand};
 use pango::{Alignment, FontDescription};
 use pangocairo::functions as pangocairo;
-use roxmltree::Document;
+use xmltree::{Element, XMLNode};
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 struct Color {
@@ -300,9 +300,9 @@ fn draw_sbgnml(
     show_clone_markers: bool,
 ) -> Result<()> {
     let xml = fs::read_to_string(input).with_context(|| format!("Failed to read {:?}", input))?;
-    let doc = Document::parse(&xml).context("Failed to parse SBGN XML")?;
-    let render_info = parse_render_information(&doc);
-    let (glyphs, arcs, bounds) = parse_sbgn(&doc)?;
+    let root = Element::parse(xml.as_bytes()).context("Failed to parse SBGN XML")?;
+    let render_info = parse_render_information(&root);
+    let (glyphs, arcs, bounds) = parse_sbgn(&root)?;
     let tag_orientations = compute_tag_orientations(&glyphs, &arcs);
 
     let (transform, width_f, height_f) = transform_with_padding(bounds, padding);
@@ -443,23 +443,51 @@ fn arc_ref_matches(arc_ref: &str, glyph_id: &str) -> bool {
     arc_ref == glyph_id || arc_ref.starts_with(&format!("{glyph_id}."))
 }
 
-fn parse_render_information(doc: &Document) -> RenderInfo {
+fn element_attr<'a>(element: &'a Element, name: &str) -> Option<&'a str> {
+    element.attributes.get(name).map(String::as_str)
+}
+
+fn child_elements<'a>(element: &'a Element) -> impl Iterator<Item = &'a Element> {
+    element.children.iter().filter_map(|node| match node {
+        XMLNode::Element(child) => Some(child),
+        _ => None,
+    })
+}
+
+fn find_first_descendant<'a>(element: &'a Element, name: &str) -> Option<&'a Element> {
+    for child in child_elements(element) {
+        if child.name == name {
+            return Some(child);
+        }
+        if let Some(found) = find_first_descendant(child, name) {
+            return Some(found);
+        }
+    }
+    None
+}
+
+fn collect_descendants_by_name<'a>(element: &'a Element, name: &str, out: &mut Vec<&'a Element>) {
+    for child in child_elements(element) {
+        if child.name == name {
+            out.push(child);
+        }
+        collect_descendants_by_name(child, name, out);
+    }
+}
+
+fn parse_render_information(root: &Element) -> RenderInfo {
     let mut info = RenderInfo::default();
-    let Some(render_node) = doc
-        .descendants()
-        .find(|node| node.has_tag_name("renderInformation"))
-    else {
+    let Some(render_node) = find_first_descendant(root, "renderInformation") else {
         return info;
     };
 
-    for color_def in render_node
-        .descendants()
-        .filter(|node| node.has_tag_name("colorDefinition"))
-    {
-        let Some(id) = color_def.attribute("id") else {
+    let mut color_defs = Vec::new();
+    collect_descendants_by_name(render_node, "colorDefinition", &mut color_defs);
+    for color_def in color_defs {
+        let Some(id) = element_attr(color_def, "id") else {
             continue;
         };
-        let Some(value) = color_def.attribute("value") else {
+        let Some(value) = element_attr(color_def, "value") else {
             continue;
         };
         if let Some(color) = parse_color_value(value, &info.colors) {
@@ -468,40 +496,58 @@ fn parse_render_information(doc: &Document) -> RenderInfo {
     }
 
     info.background_color = render_node
-        .attribute("background-color")
+        .attributes
+        .get("background-color")
+        .map(String::as_str)
         .and_then(|value| parse_color_value(value, &info.colors));
 
-    for style_node in render_node
-        .descendants()
-        .filter(|node| node.has_tag_name("style"))
-    {
-        let g_node = style_node.children().find(|node| node.has_tag_name("g"));
+    let mut style_nodes = Vec::new();
+    collect_descendants_by_name(render_node, "style", &mut style_nodes);
+    for style_node in style_nodes {
+        let g_node = child_elements(style_node).find(|node| node.name == "g");
         let mut style = RenderStyle::default();
         if let Some(g_node) = g_node {
             style.font_size = g_node
-                .attribute("font-size")
+                .attributes
+                .get("font-size")
+                .map(String::as_str)
                 .and_then(|value| parse_f64(Some(value)));
             style.font_family = g_node
-                .attribute("font-family")
+                .attributes
+                .get("font-family")
                 .map(|value| value.to_string());
             style.font_color = g_node
-                .attribute("font-color")
+                .attributes
+                .get("font-color")
+                .map(String::as_str)
                 .and_then(|value| parse_color_value(value, &info.colors));
             style.stroke_color = g_node
-                .attribute("stroke")
+                .attributes
+                .get("stroke")
+                .map(String::as_str)
                 .and_then(|value| parse_color_value(value, &info.colors));
             style.stroke_width = g_node
-                .attribute("stroke-width")
+                .attributes
+                .get("stroke-width")
+                .map(String::as_str)
                 .and_then(|value| parse_f64(Some(value)));
             style.fill_color = g_node
-                .attribute("fill")
+                .attributes
+                .get("fill")
+                .map(String::as_str)
                 .and_then(|value| parse_color_value(value, &info.colors));
             style.background_opacity = g_node
-                .attribute("background-opacity")
+                .attributes
+                .get("background-opacity")
+                .map(String::as_str)
                 .and_then(|value| parse_f64(Some(value)));
         }
 
-        let id_list = style_node.attribute("idList").unwrap_or("");
+        let id_list = style_node
+            .attributes
+            .get("idList")
+            .map(String::as_str)
+            .unwrap_or("");
         let ids: Vec<&str> = id_list.split_whitespace().collect();
         if ids.is_empty() {
             info.default_style = Some(style);
@@ -1258,8 +1304,8 @@ fn draw_double_circle_bbox(
         0.0,
         std::f64::consts::TAU,
     );
-    let fill_color = resolve_fill_color(style, Some(DEFAULT_FILL_COLOR))
-        .unwrap_or(DEFAULT_FILL_COLOR);
+    let fill_color =
+        resolve_fill_color(style, Some(DEFAULT_FILL_COLOR)).unwrap_or(DEFAULT_FILL_COLOR);
     set_source_color(ctx, fill_color);
     ctx.fill_preserve()?;
     set_source_color(ctx, resolve_stroke_color(style));
@@ -1349,8 +1395,8 @@ fn draw_source_sink_bbox(
     let rect = bbox_pixel_rect(transform, bbox);
     path_ellipse(ctx, rect)?;
     ctx.set_line_width(resolve_stroke_width(style, DEFAULT_LINE_WIDTH));
-    let fill_color = resolve_fill_color(style, Some(DEFAULT_FILL_COLOR))
-        .unwrap_or(DEFAULT_FILL_COLOR);
+    let fill_color =
+        resolve_fill_color(style, Some(DEFAULT_FILL_COLOR)).unwrap_or(DEFAULT_FILL_COLOR);
     set_source_color(ctx, fill_color);
     ctx.fill_preserve()?;
     set_source_color(ctx, resolve_stroke_color(style));
@@ -2127,7 +2173,12 @@ fn draw_state_var(
 }
 
 /// Measure label width using the current Cairo/Pango context.
-fn measure_text_width(ctx: &CairoContext, text: &str, font_px: f64, font_family: Option<&str>) -> f64 {
+fn measure_text_width(
+    ctx: &CairoContext,
+    text: &str,
+    font_px: f64,
+    font_family: Option<&str>,
+) -> f64 {
     let layout = pangocairo::create_layout(ctx);
     let family = font_family.unwrap_or(FONT_FAMILY);
     let mut font_desc = FontDescription::from_string(family);
@@ -2161,8 +2212,8 @@ fn draw_circle_bbox(
     let center = transform.map_point(bbox.x + bbox.w / 2.0, bbox.y + bbox.h / 2.0);
     let radius = transform.scale_scalar(bbox.w.min(bbox.h) / 2.0);
     ctx.arc(center.x, center.y, radius, 0.0, std::f64::consts::TAU);
-    let fill_color = resolve_fill_color(style, Some(DEFAULT_FILL_COLOR))
-        .unwrap_or(DEFAULT_FILL_COLOR);
+    let fill_color =
+        resolve_fill_color(style, Some(DEFAULT_FILL_COLOR)).unwrap_or(DEFAULT_FILL_COLOR);
     set_source_color(ctx, fill_color);
     ctx.fill_preserve()?;
     set_source_color(ctx, resolve_stroke_color(style));
@@ -2532,9 +2583,7 @@ fn draw_arc(
             draw_inhibition_bar(ctx, end, prev, bar_length, bar_offset)?;
             draw_open_triangle_opaque(ctx, end, prev, arrow_size, stroke_color)?;
         }
-        "catalysis" => {
-            draw_filled_circle_tangent(ctx, end, prev, arrow_size * 0.4, stroke_color)?
-        }
+        "catalysis" => draw_filled_circle_tangent(ctx, end, prev, arrow_size * 0.4, stroke_color)?,
         "equivalence arc" => {}
         _ => {}
     }
@@ -2906,57 +2955,48 @@ fn glyph_font_px(class_name: &str) -> f64 {
     }
 }
 
-fn parse_sbgn(doc: &Document) -> Result<(Vec<Glyph>, Vec<Arc>, Bounds)> {
-    let arc_nodes: Vec<_> = doc
-        .descendants()
-        .filter(|node| node.has_tag_name("arc"))
-        .collect();
+fn parse_sbgn(root: &Element) -> Result<(Vec<Glyph>, Vec<Arc>, Bounds)> {
+    let mut arc_nodes = Vec::new();
+    collect_descendants_by_name(root, "arc", &mut arc_nodes);
 
     let mut glyphs = Vec::new();
-    let map_node = doc
-        .descendants()
-        .find(|node| node.has_tag_name("map"))
+    let map_node = find_first_descendant(root, "map")
         .ok_or_else(|| anyhow!("SBGN file missing map element"))?;
-    for glyph_node in map_node
-        .children()
-        .filter(|node| node.has_tag_name("glyph"))
-    {
-        parse_glyph_node(&glyph_node, None, &mut glyphs)?;
+    for glyph_node in child_elements(map_node).filter(|node| node.name == "glyph") {
+        parse_glyph_node(glyph_node, None, &mut glyphs)?;
     }
 
     let mut arcs = Vec::new();
     for arc in arc_nodes {
-        let arc_id = arc.attribute("id").unwrap_or_default().to_string();
-        let class_name = arc.attribute("class").unwrap_or_default().to_string();
-        let source = arc.attribute("source").map(|value| value.to_string());
-        let target = arc.attribute("target").map(|value| value.to_string());
-        let start = arc
-            .children()
-            .find(|node| node.has_tag_name("start"))
+        let arc_id = element_attr(arc, "id").unwrap_or_default().to_string();
+        let class_name = element_attr(arc, "class").unwrap_or_default().to_string();
+        let source = element_attr(arc, "source").map(|value| value.to_string());
+        let target = element_attr(arc, "target").map(|value| value.to_string());
+        let start = child_elements(arc)
+            .find(|node| node.name == "start")
             .ok_or_else(|| anyhow!("Arc missing start"))?;
-        let end = arc
-            .children()
-            .find(|node| node.has_tag_name("end"))
+        let end = child_elements(arc)
+            .find(|node| node.name == "end")
             .ok_or_else(|| anyhow!("Arc missing end"))?;
 
         let mut points = Vec::new();
         points.push(Point {
-            x: parse_f64(start.attribute("x")).ok_or_else(|| anyhow!("Bad arc start x"))?,
-            y: parse_f64(start.attribute("y")).ok_or_else(|| anyhow!("Bad arc start y"))?,
+            x: parse_f64(element_attr(start, "x")).ok_or_else(|| anyhow!("Bad arc start x"))?,
+            y: parse_f64(element_attr(start, "y")).ok_or_else(|| anyhow!("Bad arc start y"))?,
         });
 
-        for next in arc.children().filter(|node| node.has_tag_name("next")) {
+        for next in child_elements(arc).filter(|node| node.name == "next") {
             if let (Some(x), Some(y)) = (
-                parse_f64(next.attribute("x")),
-                parse_f64(next.attribute("y")),
+                parse_f64(element_attr(next, "x")),
+                parse_f64(element_attr(next, "y")),
             ) {
                 points.push(Point { x, y });
             }
         }
 
         points.push(Point {
-            x: parse_f64(end.attribute("x")).ok_or_else(|| anyhow!("Bad arc end x"))?,
-            y: parse_f64(end.attribute("y")).ok_or_else(|| anyhow!("Bad arc end y"))?,
+            x: parse_f64(element_attr(end, "x")).ok_or_else(|| anyhow!("Bad arc end x"))?,
+            y: parse_f64(element_attr(end, "y")).ok_or_else(|| anyhow!("Bad arc end y"))?,
         });
 
         arcs.push(Arc {
@@ -2973,44 +3013,41 @@ fn parse_sbgn(doc: &Document) -> Result<(Vec<Glyph>, Vec<Arc>, Bounds)> {
 }
 
 fn parse_glyph_node(
-    glyph: &roxmltree::Node,
+    glyph: &Element,
     parent_id: Option<String>,
     glyphs: &mut Vec<Glyph>,
 ) -> Result<()> {
     // Walk the SBGN XML tree recursively so child glyphs (units, state vars) keep their parent.
-    let id = glyph.attribute("id").unwrap_or_default().to_string();
-    let class_name = glyph.attribute("class").unwrap_or_default().to_string();
-    let label_node = glyph.children().find(|node| node.has_tag_name("label"));
+    let id = element_attr(glyph, "id").unwrap_or_default().to_string();
+    let class_name = element_attr(glyph, "class").unwrap_or_default().to_string();
+    let label_node = child_elements(glyph).find(|node| node.name == "label");
     let mut label = label_node
-        .and_then(|node| node.attribute("text"))
+        .and_then(|node| element_attr(node, "text"))
         .unwrap_or("")
         .to_string();
     label = label.replace('\r', "");
 
-    let bbox_node = glyph.children().find(|node| node.has_tag_name("bbox"));
-    let bbox = bbox_node.and_then(|node| parse_bbox(&node));
+    let bbox_node = child_elements(glyph).find(|node| node.name == "bbox");
+    let bbox = bbox_node.and_then(|node| parse_bbox(node));
 
-    let ports = glyph
-        .children()
-        .filter(|node| node.has_tag_name("port"))
+    let ports = child_elements(glyph)
+        .filter(|node| node.name == "port")
         .filter_map(|node| {
-            let x = parse_f64(node.attribute("x"))?;
-            let y = parse_f64(node.attribute("y"))?;
+            let x = parse_f64(element_attr(node, "x"))?;
+            let y = parse_f64(element_attr(node, "y"))?;
             Some(Point { x, y })
         })
         .collect();
 
-    let has_clone = glyph.children().any(|node| node.has_tag_name("clone"));
-    let state_node = glyph.children().find(|node| node.has_tag_name("state"));
+    let has_clone = child_elements(glyph).any(|node| node.name == "clone");
+    let state_node = child_elements(glyph).find(|node| node.name == "state");
     let state_value = state_node
-        .and_then(|node| node.attribute("value"))
+        .and_then(|node| element_attr(node, "value"))
         .map(|value| value.to_string());
     let state_variable = state_node
-        .and_then(|node| node.attribute("variable"))
+        .and_then(|node| element_attr(node, "variable"))
         .map(|value| value.to_string());
-    let orientation = glyph
-        .attribute("orientation")
-        .map(|value| value.to_string());
+    let orientation = element_attr(glyph, "orientation").map(|value| value.to_string());
 
     let glyph_id = id.clone();
     glyphs.push(Glyph {
@@ -3026,18 +3063,18 @@ fn parse_glyph_node(
         orientation,
     });
 
-    for child in glyph.children().filter(|node| node.has_tag_name("glyph")) {
-        parse_glyph_node(&child, Some(glyph_id.clone()), glyphs)?;
+    for child in child_elements(glyph).filter(|node| node.name == "glyph") {
+        parse_glyph_node(child, Some(glyph_id.clone()), glyphs)?;
     }
     Ok(())
 }
 
-fn parse_bbox(node: &roxmltree::Node) -> Option<BBox> {
+fn parse_bbox(node: &Element) -> Option<BBox> {
     Some(BBox {
-        x: parse_f64(node.attribute("x"))?,
-        y: parse_f64(node.attribute("y"))?,
-        w: parse_f64(node.attribute("w"))?,
-        h: parse_f64(node.attribute("h"))?,
+        x: parse_f64(element_attr(node, "x"))?,
+        y: parse_f64(element_attr(node, "y"))?,
+        w: parse_f64(element_attr(node, "w"))?,
+        h: parse_f64(element_attr(node, "h"))?,
     })
 }
 
