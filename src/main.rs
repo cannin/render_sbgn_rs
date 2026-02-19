@@ -419,6 +419,41 @@ fn compute_tag_orientations(glyphs: &[Glyph], arcs: &[Arc]) -> HashMap<String, T
     orientations
 }
 
+fn compute_default_label_font_px(glyphs: &[Glyph], render_info: &RenderInfo) -> Option<f64> {
+    let mut counts: HashMap<i64, (usize, f64)> = HashMap::new();
+    for glyph in glyphs {
+        if matches!(
+            glyph.class_name.as_str(),
+            "unit of information"
+                | "state variable"
+                | "and"
+                | "or"
+                | "not"
+                | "delay"
+                | "omitted process"
+                | "uncertain process"
+        ) {
+            continue;
+        }
+        let style = merged_style(
+            render_info.styles.get(&glyph.id),
+            render_info.default_style.as_ref(),
+        );
+        let size = resolve_font_px(&style, glyph_font_px(glyph.class_name.as_str()));
+        if size <= 0.0 {
+            continue;
+        }
+        let bucket = (size * 10.0).round() as i64;
+        let entry = counts.entry(bucket).or_insert((0, size));
+        entry.0 += 1;
+        entry.1 = size;
+    }
+    counts
+        .into_values()
+        .max_by_key(|(count, _)| *count)
+        .map(|(_, size)| size)
+}
+
 fn match_arc_connection(arc: &Arc, glyph_id: &str) -> (bool, Option<Point>) {
     let source_matches = arc
         .source
@@ -698,6 +733,7 @@ fn render_sbgnml(
     tag_orientations: &HashMap<String, TagOrientation>,
     show_clone_markers: bool,
 ) -> Result<()> {
+    let logical_font_px = compute_default_label_font_px(glyphs, render_info);
     let mut child_map: HashMap<String, Vec<&Glyph>> = HashMap::new();
     for glyph in glyphs {
         if let Some(parent_id) = &glyph.parent_id {
@@ -723,6 +759,7 @@ fn render_sbgnml(
             glyph,
             &child_map,
             render_info,
+            logical_font_px,
             tag_orientations,
             show_clone_markers,
         )?;
@@ -814,6 +851,7 @@ fn render_glyph_tree(
     glyph: &Glyph,
     child_map: &HashMap<String, Vec<&Glyph>>,
     render_info: &RenderInfo,
+    logical_font_px: Option<f64>,
     tag_orientations: &HashMap<String, TagOrientation>,
     show_clone_markers: bool,
 ) -> Result<()> {
@@ -829,6 +867,7 @@ fn render_glyph_tree(
         "and" => Some("AND"),
         "or" => Some("OR"),
         "not" => Some("NOT"),
+        "delay" => Some("τ"),
         "omitted process" => Some("\\\\"),
         "uncertain process" => Some("?"),
         _ => None,
@@ -844,7 +883,15 @@ fn render_glyph_tree(
         render_info.styles.get(&glyph.id),
         render_info.default_style.as_ref(),
     );
-    let font_px = resolve_font_px(&style, glyph_font_px(class_name));
+    let mut font_px = resolve_font_px(&style, glyph_font_px(class_name));
+    if matches!(
+        class_name,
+        "and" | "or" | "not" | "delay" | "omitted process" | "uncertain process"
+    ) {
+        if let Some(default_label_px) = logical_font_px {
+            font_px = default_label_px;
+        }
+    }
     let font_family = resolve_font_family(&style);
     let font_color = resolve_font_color(&style);
     let has_clone = show_clone_markers && glyph.has_clone;
@@ -987,7 +1034,7 @@ fn render_glyph_tree(
                 s_var_label.as_deref(),
             )?;
         }
-        "source and sink" => draw_source_sink_bbox(
+        "source and sink" | "empty set" => draw_source_sink_bbox(
             ctx,
             transform,
             bbox,
@@ -1083,7 +1130,7 @@ fn render_glyph_tree(
             &style,
             false,
         )?,
-        "and" | "or" | "not" => {
+        "and" | "or" | "not" | "delay" => {
             draw_circle_bbox(
                 ctx,
                 transform,
@@ -1152,6 +1199,7 @@ fn render_glyph_tree(
             child,
             child_map,
             render_info,
+            logical_font_px,
             tag_orientations,
             show_clone_markers,
         )?;
@@ -2084,7 +2132,7 @@ fn draw_overlay_line(
 }
 
 fn port_connector_len_px_for_class(class_name: &str) -> f64 {
-    if matches!(class_name, "and" | "or" | "not") {
+    if matches!(class_name, "and" | "or" | "not" | "delay") {
         LOGICAL_PORT_CONNECTOR_LEN_PX
     } else {
         PORT_CONNECTOR_LEN_PX
@@ -2566,11 +2614,13 @@ fn draw_arc(
     let prev = points[points.len() - 2];
 
     match class_name {
-        "assignment" | "unknown influence" => draw_open_triangle(ctx, end, prev, arrow_size)?,
+        "assignment" => draw_open_triangle(ctx, end, prev, arrow_size)?,
         "positive influence" | "stimulation" => {
             draw_open_triangle_opaque(ctx, end, prev, arrow_size, stroke_color)?
         }
-        "modulation" => draw_open_diamond_opaque(ctx, end, prev, arrow_size, stroke_color)?,
+        "modulation" | "unknown influence" => {
+            draw_open_diamond_opaque(ctx, end, prev, arrow_size, stroke_color)?
+        }
         "production" => draw_filled_triangle(ctx, end, prev, arrow_size)?,
         "negative influence" | "inhibition" => {
             draw_inhibition_bar(ctx, end, prev, bar_length, 0.0)?
@@ -2931,14 +2981,14 @@ fn default_dimensions(class_name: &str) -> Option<(f64, f64)> {
         "nucleic acid feature" => Some((88.0, 56.0)),
         "nucleic acid feature multimer" => Some((88.0, 52.0)),
         "complex" | "complex multimer" => Some((10.0, 10.0)),
-        "source and sink" => Some((60.0, 60.0)),
+        "source and sink" | "empty set" => Some((60.0, 60.0)),
         "perturbing agent" => Some((140.0, 60.0)),
         "phenotype" => Some((140.0, 60.0)),
         "process" | "uncertain process" | "omitted process" => Some((25.0, 25.0)),
         "association" | "dissociation" => Some((25.0, 25.0)),
         "compartment" => Some((50.0, 50.0)),
         "tag" => Some((100.0, 65.0)),
-        "and" | "or" | "not" => Some((40.0, 40.0)),
+        "and" | "or" | "not" | "delay" => Some((40.0, 40.0)),
         _ => None,
     }
 }
@@ -2949,7 +2999,6 @@ fn glyph_font_px(class_name: &str) -> f64 {
         | "unit of information"
         | "cardinality"
         | "variable value"
-        | "tag"
         | "terminal" => FONT_SMALL_PX,
         _ => FONT_MAIN_PX,
     }
